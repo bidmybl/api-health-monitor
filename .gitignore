@@ -8,6 +8,10 @@
 # Test binary, built with `go test -c`
 *.test
 
+/vendor/
+
+*.log
+
 # Code coverage profiles and other test artifacts
 *.out
 coverage.*
@@ -20,6 +24,8 @@ go.work.sum
 
 # env file
 .env
+.env.*
+!.env.example
 
 # Editor/IDE
 .vscode/
