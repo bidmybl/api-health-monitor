@@ -2,31 +2,37 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"time"
+
+	"github.com/bidmybl/api-health-monitor/internal/config"
 
 	"github.com/jackc/pgx/v5"
 )
 
 func main() {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		log.Fatal("DATABASE_URL is not set")
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("failed to load config", "error", err)
+		os.Exit(1)
 	}
+	
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	conn, err := pgx.Connect(ctx, databaseURL)
+	
+	conn, err := pgx.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("failed to connect to db: %v", err)
+		logger.Error("failed to connect to db", "error", err)
+		os.Exit(1)
 	}
 	defer conn.Close(context.Background())
 
 	if err := conn.Ping(ctx); err != nil {
-		log.Fatalf("failed to ping db: %v", err)
+		slog.Error("failed to ping db", "error", err)
 	}
 
-	fmt.Println("Successfully connected to db!")
+	logger.Info("connected to PostgreSQL")
 }
