@@ -1,7 +1,7 @@
 package config
 
 import (
-	"fmt"
+	"errors"
 	"os"
 )
 
@@ -12,7 +12,7 @@ type Config struct {
 func Load() (Config, error) {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		return Config{}, fmt.Errorf("DATABASE_URL is not set")
+		return Config{}, errors.New("DATABASE_URL is not set")
 	}
 
 	return Config{
