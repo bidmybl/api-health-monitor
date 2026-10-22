@@ -1,0 +1,7 @@
+out/
+pgdata/
+exe
+app
+.git
+.vscode
+.env
