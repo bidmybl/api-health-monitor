@@ -77,6 +77,24 @@ func (r *Repository) GetEndpoints(ctx context.Context) ([]Endpoint, error) {
 	return endpoints, err
 }
 
+func (r *Repository) GetActiveEndpoints(ctx context.Context) ([]Endpoint, error) {
+	query := `
+	SELECT id, url, check_interval_seconds, is_active, created_at, updated_at 
+	FROM monitored_endpoints
+	WHERE is_active = true
+	ORDER BY id;
+	`
+
+	rows, err := r.pool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	endpoints, err := pgx.CollectRows(rows, pgx.RowToStructByName[Endpoint])
+
+	return endpoints, err
+}
+
 func (r *Repository) UpdateEndpoint(ctx context.Context, id int64, checkIntervalSeconds int, isActive bool) (Endpoint, error) {
 	query := `
 	UPDATE 	monitored_endpoints

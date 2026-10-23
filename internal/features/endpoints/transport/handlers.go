@@ -19,6 +19,7 @@ type EndpointRepository interface {
 	Create(ctx context.Context, url string, checkIntervalSeconds int) (repository.Endpoint, error)
 	GetEndpointByID(ctx context.Context, id int64) (repository.Endpoint, error)
 	GetEndpoints(ctx context.Context) ([]repository.Endpoint, error)
+	GetActiveEndpoints(ctx context.Context) ([]repository.Endpoint, error)
 	UpdateEndpoint(ctx context.Context, id int64, checkIntervalSeconds int, isActive bool) (repository.Endpoint, error)
 	DeleteEndpoint(ctx context.Context, id int64) error
 }
@@ -81,7 +82,6 @@ func (h *Handler) GetEndpoint(w http.ResponseWriter, r *http.Request) {
 				"endpoint_id", id,
 			)
 			writeError(w, http.StatusNotFound, "endpoint not found", h.logger)
-			return
 		} else {
 			h.logger.Error(
 				"failed to get endpoint by ID",
@@ -89,7 +89,6 @@ func (h *Handler) GetEndpoint(w http.ResponseWriter, r *http.Request) {
 				"endpoint_id", id,
 			)
 			writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
-			return
 		}
 	}
 
@@ -126,13 +125,12 @@ func (h *Handler) GetAllEndpoints(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
 		return
 	}
-	
+
 	if err := respondJSON(w, http.StatusOK, endpoints); err != nil {
 		h.logger.Error(
 			"failed to write endpoints response",
 			"error", err,
 		)
-		return
 	}
 }
 
@@ -149,7 +147,29 @@ failed:
   - status code: 400, 500, ...
   - response body: JSON with error + time
 */
-func (h *Handler) GetAllActiveEndpoints(w http.ResponseWriter, r *http.Request) {}
+func (h *Handler) GetAllActiveEndpoints(w http.ResponseWriter, r *http.Request) {
+	isActive := r.URL.Query().Get("is_active")
+	if isActive == "true" {
+		endpoints, err := h.repo.GetActiveEndpoints(r.Context())
+		if err != nil {
+			h.logger.Error(
+				"failed to get all endpoints",
+				"error", err,
+			)
+			writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
+			return
+		}
+
+		if err := respondJSON(w, http.StatusOK, endpoints); err != nil {
+			h.logger.Error(
+				"failed to write endpoints response",
+				"error", err,
+			)
+		}
+	} else {
+		h.GetAllEndpoints(w, r)
+	}
+}
 
 /*
 pattern: /endpoints/{id}
@@ -179,4 +199,31 @@ failed:
   - status code: 400, 404, 500, ...
   - response body: JSON with error + time
 */
-func (h *Handler) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {}
+func (h *Handler) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		h.logger.Warn(
+			"invalid endpoint ID",
+			"id", r.PathValue("id"),
+		)
+		writeError(w, http.StatusBadRequest, "invalid endpoint ID", h.logger)
+		return
+	}
+
+	if err := h.repo.DeleteEndpoint(r.Context(), id); err != nil {
+		if errors.Is(err, repository.ErrEndpointNotFound) {
+			h.logger.Warn(
+				"endpoint not found",
+				"id", id,
+			)
+			writeError(w, http.StatusNotFound, "endpoint not found", h.logger)
+		} else {
+			h.logger.Error(
+				"failed to delete endpoint",
+				"error", err,
+				"id", id,
+			)
+			writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
+		}
+	}
+}
