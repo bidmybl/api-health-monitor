@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
-	repository "github.com/bidmybl/api-health-monitor/internal/features/endpoints/repository"
+	"github.com/bidmybl/api-health-monitor/internal/features/endpoints/repository"
 )
 
 type Handler struct {
@@ -33,10 +33,6 @@ func NewHandler(repo EndpointRepository, logger *slog.Logger) *Handler {
 		logger: logger,
 	}
 }
-
-// type EndpointRequestDTO struct {}
-
-// ==================================================================================================
 
 /*
 pattern: /endpoints
