@@ -21,7 +21,16 @@ type ErrorResponse struct {
 	Time  string `json:"time"`
 }
 
-// Вот тут стоит большой вопрос нужен ли еще и здесь логгер и че как это лучше всего вообще обрабатывать
+type CreateEndpointDTO struct {
+	URL                  string `json:"url"`
+	CheckIntervalSeconds int    `json:"check_interval_seconds"`
+}
+
+type UpdateEndpointDTO struct {
+	CheckIntervalSeconds int  `json:"check_interval_seconds"`
+	IsActive             bool `json:"is_active"`
+}
+
 func respondJSON(w http.ResponseWriter, status int, message any) error {
 	body, err := json.Marshal(message)
 	if err != nil {
@@ -35,12 +44,6 @@ func respondJSON(w http.ResponseWriter, status int, message any) error {
 	return err
 }
 
-// Крч, я так прикинул и понял, что будет куда удобнее записывать логи прямо в функциях
-// Из плюсов - это позволит писать меньше шаблонного кода
-// Из минусов - нужно скорее всего возвращать типа ok bool, чтобы убеждаться, что все проходит хорошо
-// (но это не точно, стоит обдумать)
-// Обудмал - не нужно
-// P.S.: возможно все-таки стоит сделать эту функцию методом хэндлера
 func writeError(
 	w http.ResponseWriter,
 	status int,
@@ -58,5 +61,33 @@ func writeError(
 			"error", err,
 			"status", status,
 		)
+	}
+}
+
+func decodeJSON[T any](w http.ResponseWriter, r *http.Request, out *T, logger *slog.Logger) {
+	if r.Body == nil {
+		logger.Error(
+			"request body is empty",
+		)
+		writeError(w, http.StatusBadRequest, "request body is empty", logger)
+		return
+	}
+	defer func() {
+		if err := r.Body.Close(); err != nil {
+			logger.Error(
+				"failed to close request body",
+				"error", err,
+			)
+			writeError(w, http.StatusInternalServerError, "failed to close request body", logger)
+		}
+	}()
+
+	err := json.UnmarshalRead(r.Body, out)
+	if err != nil {
+		logger.Error(
+			"failed to decode JSON body",
+			"error", err,
+		)
+		writeError(w, http.StatusBadRequest, "invalid JSON body", logger)
 	}
 }

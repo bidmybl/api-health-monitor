@@ -48,7 +48,27 @@ failed:
   - status code: 400, 409, 500, ...
   - response body: JSON with error + time
 */
-func (h *Handler) CreateEndpoint(w http.ResponseWriter, r *http.Request) {}
+func (h *Handler) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
+	var request CreateEndpointDTO
+	decodeJSON(w, r, &request, h.logger)
+	
+	endpoint, err := h.repo.Create(r.Context(), request.URL, request.CheckIntervalSeconds)
+	if err != nil {
+		h.logger.Error(
+			"failed to create endpoint",
+			"error", err,
+		)
+		writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
+	}
+
+	if err := respondJSON(w, http.StatusOK, endpoint); err != nil {
+		h.logger.Error(
+			"failed to write endpoint response",
+			"error", err,
+		)
+		return
+	}
+}
 
 /*
 pattern: /endpoints/{id}
@@ -144,7 +164,7 @@ succeed:
   - response body: JSON represented found endpoints
 
 failed:
-  - status code: 400, 500, ...
+  - status code: 500, ...
   - response body: JSON with error + time
 */
 func (h *Handler) GetAllActiveEndpoints(w http.ResponseWriter, r *http.Request) {
@@ -184,7 +204,47 @@ failed:
   - status code: 400, 409, 500, ...
   - response body: JSON with error + time
 */
-func (h *Handler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {}
+func (h *Handler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		h.logger.Warn(
+			"invalid endpoint ID",
+			"id", r.PathValue("id"),
+		)
+		writeError(w, http.StatusBadRequest, "invalid endpoint ID", h.logger)
+		return
+	}
+
+	var request UpdateEndpointDTO
+	decodeJSON(w, r, &request, h.logger)
+
+	endpoint, err := h.repo.UpdateEndpoint(r.Context(), id, request.CheckIntervalSeconds, request.IsActive)
+	if err != nil {
+		if errors.Is(err, repository.ErrEndpointNotFound) {
+			h.logger.Warn(
+				"endpoint not found",
+				"endpoint_id", id,
+			)
+			writeError(w, http.StatusNotFound, "endpoint not found", h.logger)
+		} else {
+			h.logger.Error(
+				"failed to update endpoint",
+				"error", err,
+				"endpoint_id", id,
+			)
+			writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
+		}
+	}
+
+	if err := respondJSON(w, http.StatusOK, endpoint); err != nil {
+		h.logger.Error(
+			"failed to write endpoint response",
+			"error", err,
+			"endpoint_id", id,
+		)
+		return
+	}
+}
 
 /*
 pattern: /endpoints/{id}
