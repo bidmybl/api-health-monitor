@@ -8,6 +8,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+var ErrEndpointNotFound = errors.New("endpoint not found")
+
 type Repository struct {
 	pool *pgxpool.Pool
 }
