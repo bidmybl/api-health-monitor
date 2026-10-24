@@ -64,13 +64,13 @@ func writeError(
 	}
 }
 
-func decodeJSON[T any](w http.ResponseWriter, r *http.Request, out *T, logger *slog.Logger) {
+func decodeJSON[T any](w http.ResponseWriter, r *http.Request, out *T, logger *slog.Logger) error {
 	if r.Body == nil {
 		logger.Error(
 			"request body is empty",
 		)
 		writeError(w, http.StatusBadRequest, "request body is empty", logger)
-		return
+		return http.ErrBodyNotAllowed
 	}
 	defer func() {
 		if err := r.Body.Close(); err != nil {
@@ -89,5 +89,7 @@ func decodeJSON[T any](w http.ResponseWriter, r *http.Request, out *T, logger *s
 			"error", err,
 		)
 		writeError(w, http.StatusBadRequest, "invalid JSON body", logger)
+		return err
 	}
+	return nil
 }

@@ -50,8 +50,15 @@ failed:
 */
 func (h *Handler) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 	var request CreateEndpointDTO
-	decodeJSON(w, r, &request, h.logger)
-	
+	if err := decodeJSON(w, r, &request, h.logger); err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"invalid JSON body",
+			h.logger,
+		)
+		return
+	}
 	endpoint, err := h.repo.Create(r.Context(), request.URL, request.CheckIntervalSeconds)
 	if err != nil {
 		h.logger.Error(
@@ -59,14 +66,14 @@ func (h *Handler) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 			"error", err,
 		)
 		writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
+
 	}
 
-	if err := respondJSON(w, http.StatusOK, endpoint); err != nil {
+	if err := respondJSON(w, http.StatusCreated, endpoint); err != nil {
 		h.logger.Error(
 			"failed to write endpoint response",
 			"error", err,
 		)
-		return
 	}
 }
 
@@ -102,6 +109,7 @@ func (h *Handler) GetEndpoint(w http.ResponseWriter, r *http.Request) {
 				"endpoint_id", id,
 			)
 			writeError(w, http.StatusNotFound, "endpoint not found", h.logger)
+			return
 		} else {
 			h.logger.Error(
 				"failed to get endpoint by ID",
@@ -109,6 +117,7 @@ func (h *Handler) GetEndpoint(w http.ResponseWriter, r *http.Request) {
 				"endpoint_id", id,
 			)
 			writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
+			return
 		}
 	}
 
@@ -118,7 +127,6 @@ func (h *Handler) GetEndpoint(w http.ResponseWriter, r *http.Request) {
 			"error", err,
 			"endpoint_id", id,
 		)
-		return
 	}
 }
 
@@ -216,8 +224,15 @@ func (h *Handler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var request UpdateEndpointDTO
-	decodeJSON(w, r, &request, h.logger)
-
+	if err := decodeJSON(w, r, &request, h.logger); err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"invalid JSON body",
+			h.logger,
+		)
+		return
+	}
 	endpoint, err := h.repo.UpdateEndpoint(r.Context(), id, request.CheckIntervalSeconds, request.IsActive)
 	if err != nil {
 		if errors.Is(err, repository.ErrEndpointNotFound) {
@@ -226,6 +241,7 @@ func (h *Handler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {
 				"endpoint_id", id,
 			)
 			writeError(w, http.StatusNotFound, "endpoint not found", h.logger)
+			return
 		} else {
 			h.logger.Error(
 				"failed to update endpoint",
@@ -233,6 +249,7 @@ func (h *Handler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {
 				"endpoint_id", id,
 			)
 			writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
+			return
 		}
 	}
 
@@ -242,7 +259,6 @@ func (h *Handler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {
 			"error", err,
 			"endpoint_id", id,
 		)
-		return
 	}
 }
 
@@ -286,4 +302,5 @@ func (h *Handler) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
 		}
 	}
+	w.WriteHeader(http.StatusNoContent)
 }
