@@ -12,5 +12,5 @@ WORKDIR /app
 COPY --from=builder /app/exe .
 COPY migrations ./migrations
 
-EXPOSE 8080
+EXPOSE 8090
 ENTRYPOINT [ "/app/exe" ]
