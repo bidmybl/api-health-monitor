@@ -2,9 +2,12 @@ package transport
 
 import (
 	"encoding/json/v2"
-	"log/slog"
+	"errors"
 	"net/http"
+	"net/url"
 	"time"
+
+	"github.com/bidmybl/api-health-monitor/internal/features/endpoints/repository"
 )
 
 type EndpointResponseDTO struct {
@@ -23,12 +26,50 @@ type ErrorResponse struct {
 
 type CreateEndpointDTO struct {
 	URL                  string `json:"url"`
-	CheckIntervalSeconds int    `json:"check_interval_seconds"`
+	CheckIntervalSeconds *int   `json:"check_interval_seconds"`
 }
 
 type UpdateEndpointDTO struct {
-	CheckIntervalSeconds int  `json:"check_interval_seconds"`
-	IsActive             bool `json:"is_active"`
+	CheckIntervalSeconds *int  `json:"check_interval_seconds"`
+	IsActive             *bool `json:"is_active"`
+}
+
+func toEndpointResponse(endpoint repository.Endpoint) EndpointResponseDTO {
+	return EndpointResponseDTO{
+		ID:                   endpoint.ID,
+		URL:                  endpoint.URL,
+		CheckIntervalSeconds: endpoint.CheckIntervalSeconds,
+		IsActive:             endpoint.IsActive,
+		CreatedAt:            endpoint.CreatedAt,
+		UpdatedAt:            endpoint.UpdatedAt,
+	}
+}
+
+func toEndpointResponses(endpoints []repository.Endpoint) []EndpointResponseDTO {
+	responses := make([]EndpointResponseDTO, 0, len(endpoints))
+
+	for _, endpoint := range endpoints {
+		responses = append(responses, toEndpointResponse(endpoint))
+	}
+
+	return responses
+}
+
+func validateURL(rawURL string) bool {
+	u, err := url.ParseRequestURI(rawURL)
+	if err != nil {
+		return false
+	}
+
+	if u.Host == "" {
+		return false
+	}
+
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+
+	return true
 }
 
 func respondJSON(w http.ResponseWriter, status int, message any) error {
@@ -44,11 +85,10 @@ func respondJSON(w http.ResponseWriter, status int, message any) error {
 	return err
 }
 
-func writeError(
+func (h *Handler) writeError(
 	w http.ResponseWriter,
 	status int,
 	message string,
-	logger *slog.Logger,
 ) {
 	if err := respondJSON(w,
 		status,
@@ -56,7 +96,7 @@ func writeError(
 			Error: message,
 			Time:  time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {
-		logger.Error(
+		h.logger.Error(
 			"failed to write error response",
 			"error", err,
 			"status", status,
@@ -64,32 +104,12 @@ func writeError(
 	}
 }
 
-func decodeJSON[T any](w http.ResponseWriter, r *http.Request, out *T, logger *slog.Logger) error {
+func decodeJSON[T any](w http.ResponseWriter, r *http.Request, out *T) error {
 	if r.Body == nil {
-		logger.Error(
-			"request body is empty",
-		)
-		writeError(w, http.StatusBadRequest, "request body is empty", logger)
-		return http.ErrBodyNotAllowed
+		return errors.New("request body is missing")
 	}
-	defer func() {
-		if err := r.Body.Close(); err != nil {
-			logger.Error(
-				"failed to close request body",
-				"error", err,
-			)
-			writeError(w, http.StatusInternalServerError, "failed to close request body", logger)
-		}
-	}()
 
-	err := json.UnmarshalRead(r.Body, out)
-	if err != nil {
-		logger.Error(
-			"failed to decode JSON body",
-			"error", err,
-		)
-		writeError(w, http.StatusBadRequest, "invalid JSON body", logger)
-		return err
-	}
-	return nil
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	return json.UnmarshalRead(r.Body, out)
 }

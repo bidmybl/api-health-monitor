@@ -3,12 +3,15 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var ErrEndpointNotFound = errors.New("endpoint not found")
+var ErrEndpointAlreadyExists = errors.New("endpoint already exists")
 
 type Repository struct {
 	pool *pgxpool.Pool
@@ -23,22 +26,48 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 func (r *Repository) Create(
 	ctx context.Context,
 	url string,
-	checkIntervalSeconds int,
+	checkIntervalSeconds *int,
 ) (Endpoint, error) {
-	query := `
-	INSERT INTO monitored_endpoints (url, check_interval_seconds)
-	VALUES ($1, $2)
-	RETURNING id, url, check_interval_seconds, is_active, created_at, updated_at;
-	`
+	var (
+		rows pgx.Rows
+		err  error
+	)
 
-	rows, err := r.pool.Query(ctx, query, url, checkIntervalSeconds)
+	if checkIntervalSeconds == nil {
+		rows, err = r.pool.Query(ctx, `
+        INSERT INTO monitored_endpoints (url)
+        VALUES ($1)
+        RETURNING id, url, check_interval_seconds, is_active, created_at, updated_at;
+    `, url)
+	} else {
+		rows, err = r.pool.Query(ctx, `
+        INSERT INTO monitored_endpoints (url, check_interval_seconds)
+        VALUES ($1, $2)
+        RETURNING id, url, check_interval_seconds, is_active, created_at, updated_at;
+    `, url, *checkIntervalSeconds)
+	}
+
 	if err != nil {
-		return Endpoint{}, err
+		var pgErr *pgconn.PgError
+
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return Endpoint{}, ErrEndpointAlreadyExists
+		}
+		return Endpoint{}, fmt.Errorf("insert monitored endpoint: %w", err)
 	}
 
 	endpoint, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[Endpoint])
+	if err != nil {
+		var pgErr *pgconn.PgError
 
-	return endpoint, err
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return Endpoint{}, ErrEndpointAlreadyExists
+		}
+
+		return Endpoint{}, fmt.Errorf("collect created endpoint: %w", err)
+	}
+
+	return endpoint, nil
 }
 
 func (r *Repository) GetEndpointByID(ctx context.Context, id int64) (Endpoint, error) {
@@ -49,71 +78,66 @@ func (r *Repository) GetEndpointByID(ctx context.Context, id int64) (Endpoint, e
 	`
 	rows, err := r.pool.Query(ctx, query, id)
 	if err != nil {
-		return Endpoint{}, err
+		return Endpoint{}, fmt.Errorf("get endpoint by ID: %w", err)
 	}
 
 	endpoint, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[Endpoint])
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Endpoint{}, ErrEndpointNotFound
 	}
-
-	return endpoint, err // посмотрев вызываемые функции понял, что вернется либо пустая структура и ошибка, либо заполненная структура и nil
-}
-
-func (r *Repository) GetEndpoints(ctx context.Context) ([]Endpoint, error) {
-	query := `
-	SELECT id, url, check_interval_seconds, is_active, created_at, updated_at 
-	FROM monitored_endpoints 
-	ORDER BY id;
-	`
-
-	rows, err := r.pool.Query(ctx, query)
 	if err != nil {
-		return nil, err
+		return Endpoint{}, fmt.Errorf("collect endpoint by ID: %w", err)
 	}
 
-	endpoints, err := pgx.CollectRows(rows, pgx.RowToStructByName[Endpoint])
-
-	return endpoints, err
+	return endpoint, nil
 }
 
-func (r *Repository) GetActiveEndpoints(ctx context.Context) ([]Endpoint, error) {
+func (r *Repository) GetEndpoints(ctx context.Context, isActive *bool) ([]Endpoint, error) {
 	query := `
 	SELECT id, url, check_interval_seconds, is_active, created_at, updated_at 
 	FROM monitored_endpoints
-	WHERE is_active = true
+	WHERE $1::boolean IS NULL OR is_active = $1
 	ORDER BY id;
 	`
 
-	rows, err := r.pool.Query(ctx, query)
+	rows, err := r.pool.Query(ctx, query, isActive)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get endpoints: %w", err)
 	}
 
 	endpoints, err := pgx.CollectRows(rows, pgx.RowToStructByName[Endpoint])
+	if err != nil {
+		return nil, fmt.Errorf("collect endpoints: %w", err)
+	}
 
 	return endpoints, err
 }
 
-func (r *Repository) UpdateEndpoint(ctx context.Context, id int64, checkIntervalSeconds int, isActive bool) (Endpoint, error) {
+func (r *Repository) UpdateEndpoint(ctx context.Context, id int64, checkIntervalSeconds *int, isActive *bool) (Endpoint, error) {
 	query := `
 	UPDATE 	monitored_endpoints
-	SET check_interval_seconds = $1, is_active = $2, updated_at = now()
+	SET 
+		check_interval_seconds = COALESCE($1, check_interval_seconds), 
+		is_active = COALESCE($2, is_active), 
+		updated_at = now()
 	WHERE id = $3
 	RETURNING id, url, check_interval_seconds, is_active, created_at, updated_at;
 	`
 
 	rows, err := r.pool.Query(ctx, query, checkIntervalSeconds, isActive, id)
 	if err != nil {
-		return Endpoint{}, err
+		return Endpoint{}, fmt.Errorf("update endpoint: %w", err)
 	}
 
 	endpoint, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[Endpoint])
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Endpoint{}, ErrEndpointNotFound
 	}
+	if err != nil {
+		return Endpoint{}, fmt.Errorf("collect updated endpoint: %w", err)
+	}
 
-	return endpoint, err
+	return endpoint, nil
 }
 
 func (r *Repository) DeleteEndpoint(ctx context.Context, id int64) error {
@@ -124,7 +148,7 @@ func (r *Repository) DeleteEndpoint(ctx context.Context, id int64) error {
 
 	cmdTag, err := r.pool.Exec(ctx, query, id)
 	if err != nil {
-		return err
+		return fmt.Errorf("delete endpoint: %w", err)
 	}
 
 	if cmdTag.RowsAffected() == 0 {

@@ -16,11 +16,10 @@ type Handler struct {
 }
 
 type EndpointRepository interface {
-	Create(ctx context.Context, url string, checkIntervalSeconds int) (repository.Endpoint, error)
+	Create(ctx context.Context, url string, checkIntervalSeconds *int) (repository.Endpoint, error)
 	GetEndpointByID(ctx context.Context, id int64) (repository.Endpoint, error)
-	GetEndpoints(ctx context.Context) ([]repository.Endpoint, error)
-	GetActiveEndpoints(ctx context.Context) ([]repository.Endpoint, error)
-	UpdateEndpoint(ctx context.Context, id int64, checkIntervalSeconds int, isActive bool) (repository.Endpoint, error)
+	GetEndpoints(ctx context.Context, isActive *bool) ([]repository.Endpoint, error)
+	UpdateEndpoint(ctx context.Context, id int64, checkIntervalSeconds *int, isActive *bool) (repository.Endpoint, error)
 	DeleteEndpoint(ctx context.Context, id int64) error
 }
 
@@ -50,26 +49,43 @@ failed:
 */
 func (h *Handler) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 	var request CreateEndpointDTO
-	if err := decodeJSON(w, r, &request, h.logger); err != nil {
-		writeError(
+	if err := decodeJSON(w, r, &request); err != nil {
+		h.logger.Warn("invalid JSON body", "error", err)
+		h.writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	if !validateURL(request.URL) {
+		h.writeError(w, http.StatusBadRequest, "invalid URL")
+		return
+	}
+
+	if request.CheckIntervalSeconds != nil && *request.CheckIntervalSeconds <= 0 {
+		h.writeError(w, http.StatusBadRequest, "check_interval_seconds must be positive")
+		return
+	}
+
+	endpoint, err := h.repo.Create(r.Context(), request.URL, request.CheckIntervalSeconds)
+	if err != nil {
+		if errors.Is(err, repository.ErrEndpointAlreadyExists) {
+			h.writeError(
+				w,
+				http.StatusConflict,
+				"endpoint URL already exists",
+			)
+			return
+		}
+
+		h.logger.Error("failed to create endpoint", "error", err)
+		h.writeError(
 			w,
-			http.StatusBadRequest,
-			"invalid JSON body",
-			h.logger,
+			http.StatusInternalServerError,
+			"internal server error",
 		)
 		return
 	}
-	endpoint, err := h.repo.Create(r.Context(), request.URL, request.CheckIntervalSeconds)
-	if err != nil {
-		h.logger.Error(
-			"failed to create endpoint",
-			"error", err,
-		)
-		writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
 
-	}
-
-	if err := respondJSON(w, http.StatusCreated, endpoint); err != nil {
+	if err := respondJSON(w, http.StatusCreated, toEndpointResponse(endpoint)); err != nil {
 		h.logger.Error(
 			"failed to write endpoint response",
 			"error", err,
@@ -97,31 +113,26 @@ func (h *Handler) GetEndpoint(w http.ResponseWriter, r *http.Request) {
 			"invalid endpoint ID",
 			"id", r.PathValue("id"),
 		)
-		writeError(w, http.StatusBadRequest, "invalid endpoint ID", h.logger)
+		h.writeError(w, http.StatusBadRequest, "invalid endpoint ID")
 		return
 	}
 
 	endpoint, err := h.repo.GetEndpointByID(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, repository.ErrEndpointNotFound) {
-			h.logger.Warn(
-				"endpoint not found",
-				"endpoint_id", id,
-			)
-			writeError(w, http.StatusNotFound, "endpoint not found", h.logger)
-			return
-		} else {
-			h.logger.Error(
-				"failed to get endpoint by ID",
-				"error", err,
-				"endpoint_id", id,
-			)
-			writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
+			h.writeError(w, http.StatusNotFound, "endpoint not found")
 			return
 		}
+		h.logger.Error(
+			"failed to get endpoint by ID",
+			"error", err,
+			"endpoint_id", id,
+		)
+		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
 
-	if err := respondJSON(w, http.StatusOK, endpoint); err != nil {
+	if err := respondJSON(w, http.StatusOK, toEndpointResponse(endpoint)); err != nil {
 		h.logger.Error(
 			"failed to write endpoint response",
 			"error", err,
@@ -144,25 +155,33 @@ failed:
   - response body: JSON with error + time
 */
 func (h *Handler) GetAllEndpoints(w http.ResponseWriter, r *http.Request) {
-	endpoints, err := h.repo.GetEndpoints(r.Context())
+	var isActive *bool
+	if values, ok := r.URL.Query()["is_active"]; ok {
+		if len(values) != 1 ||
+			(values[0] != "true" && values[0] != "false") {
+			h.writeError(
+				w,
+				http.StatusBadRequest,
+				"is_active must be true or false",
+			)
+			return
+		}
+		value := values[0] == "true"
+		isActive = &value
+	}
+	endpoints, err := h.repo.GetEndpoints(r.Context(), isActive)
 	if err != nil {
-		h.logger.Error(
-			"failed to get all endpoints",
-			"error", err,
-		)
-		writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
+		h.logger.Error("failed to get all endpoints", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
-	if err := respondJSON(w, http.StatusOK, endpoints); err != nil {
-		h.logger.Error(
-			"failed to write endpoints response",
-			"error", err,
-		)
+	if err := respondJSON(w, http.StatusOK, toEndpointResponses(endpoints)); err != nil {
+		h.logger.Error("failed to write endpoints response", "error", err)
 	}
 }
 
-/*
+/* GetAllActiveEndpoints
 pattern: /endpoints?is_active=true
 method: GET
 info: query params
@@ -175,29 +194,6 @@ failed:
   - status code: 500, ...
   - response body: JSON with error + time
 */
-func (h *Handler) GetAllActiveEndpoints(w http.ResponseWriter, r *http.Request) {
-	isActive := r.URL.Query().Get("is_active")
-	if isActive == "true" {
-		endpoints, err := h.repo.GetActiveEndpoints(r.Context())
-		if err != nil {
-			h.logger.Error(
-				"failed to get all endpoints",
-				"error", err,
-			)
-			writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
-			return
-		}
-
-		if err := respondJSON(w, http.StatusOK, endpoints); err != nil {
-			h.logger.Error(
-				"failed to write endpoints response",
-				"error", err,
-			)
-		}
-	} else {
-		h.GetAllEndpoints(w, r)
-	}
-}
 
 /*
 pattern: /endpoints/{id}
@@ -219,20 +215,30 @@ func (h *Handler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {
 			"invalid endpoint ID",
 			"id", r.PathValue("id"),
 		)
-		writeError(w, http.StatusBadRequest, "invalid endpoint ID", h.logger)
+		h.writeError(w, http.StatusBadRequest, "invalid endpoint ID")
 		return
 	}
 
 	var request UpdateEndpointDTO
-	if err := decodeJSON(w, r, &request, h.logger); err != nil {
-		writeError(
+	if err := decodeJSON(w, r, &request); err != nil {
+		h.writeError(
 			w,
 			http.StatusBadRequest,
 			"invalid JSON body",
-			h.logger,
 		)
 		return
 	}
+
+	if request.CheckIntervalSeconds == nil && request.IsActive == nil {
+		h.writeError(w, http.StatusBadRequest, "no fields to update")
+		return
+	}
+
+	if request.CheckIntervalSeconds != nil && *request.CheckIntervalSeconds <= 0 {
+		h.writeError(w, http.StatusBadRequest, "check interval must be positive")
+		return
+	}
+
 	endpoint, err := h.repo.UpdateEndpoint(r.Context(), id, request.CheckIntervalSeconds, request.IsActive)
 	if err != nil {
 		if errors.Is(err, repository.ErrEndpointNotFound) {
@@ -240,7 +246,7 @@ func (h *Handler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {
 				"endpoint not found",
 				"endpoint_id", id,
 			)
-			writeError(w, http.StatusNotFound, "endpoint not found", h.logger)
+			h.writeError(w, http.StatusNotFound, "endpoint not found")
 			return
 		} else {
 			h.logger.Error(
@@ -248,12 +254,12 @@ func (h *Handler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {
 				"error", err,
 				"endpoint_id", id,
 			)
-			writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
+			h.writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
 	}
 
-	if err := respondJSON(w, http.StatusOK, endpoint); err != nil {
+	if err := respondJSON(w, http.StatusOK, toEndpointResponse(endpoint)); err != nil {
 		h.logger.Error(
 			"failed to write endpoint response",
 			"error", err,
@@ -282,25 +288,22 @@ func (h *Handler) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 			"invalid endpoint ID",
 			"id", r.PathValue("id"),
 		)
-		writeError(w, http.StatusBadRequest, "invalid endpoint ID", h.logger)
+		h.writeError(w, http.StatusBadRequest, "invalid endpoint ID")
 		return
 	}
 
 	if err := h.repo.DeleteEndpoint(r.Context(), id); err != nil {
 		if errors.Is(err, repository.ErrEndpointNotFound) {
-			h.logger.Warn(
-				"endpoint not found",
-				"id", id,
-			)
-			writeError(w, http.StatusNotFound, "endpoint not found", h.logger)
-		} else {
-			h.logger.Error(
-				"failed to delete endpoint",
-				"error", err,
-				"id", id,
-			)
-			writeError(w, http.StatusInternalServerError, "internal server error", h.logger)
+			h.writeError(w, http.StatusNotFound, "endpoint not found")
+			return
 		}
+		h.logger.Error(
+			"failed to delete endpoint",
+			"error", err,
+			"id", id,
+		)
+		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
