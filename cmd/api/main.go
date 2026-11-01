@@ -2,12 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/bidmybl/api-health-monitor/internal/config"
+	"github.com/bidmybl/api-health-monitor/internal/features/endpoints/repository"
+	"github.com/bidmybl/api-health-monitor/internal/features/endpoints/transport"
+	"github.com/bidmybl/api-health-monitor/internal/server"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -26,7 +33,11 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
 	defer cancel()
 
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
@@ -41,5 +52,41 @@ func run(logger *slog.Logger) error {
 
 	logger.Info("connected to PostgreSQL")
 
+	endpointRepo := repository.NewRepository(pool)
+	endpointHandler := transport.NewHandler(endpointRepo, logger)
+
+	router := server.NewRouter(endpointHandler)
+
+	httpServer := &http.Server{
+		Addr:              ":8080",
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	go func() {
+		err := httpServer.ListenAndServe()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("HTTP server failed", "error", err)
+		}
+	}()
+
+	logger.Info("HTTP server started", "address", httpServer.Addr)
+
+	<-ctx.Done()
+	logger.Info("shutdown signal received")
+
+	shutdownCtx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown HTTP server: %w", err)
+	}
+	logger.Info("HTTP server stopped")
 	return nil
 }

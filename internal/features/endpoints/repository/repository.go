@@ -110,7 +110,7 @@ func (r *Repository) GetEndpoints(ctx context.Context, isActive *bool) ([]Endpoi
 		return nil, fmt.Errorf("collect endpoints: %w", err)
 	}
 
-	return endpoints, err
+	return endpoints, nil
 }
 
 func (r *Repository) UpdateEndpoint(ctx context.Context, id int64, checkIntervalSeconds *int, isActive *bool) (Endpoint, error) {

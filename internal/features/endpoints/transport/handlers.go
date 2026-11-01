@@ -181,20 +181,6 @@ func (h *Handler) GetAllEndpoints(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-/* GetAllActiveEndpoints
-pattern: /endpoints?is_active=true
-method: GET
-info: query params
-
-succeed:
-  - status code: 200 OK
-  - response body: JSON represented found endpoints
-
-failed:
-  - status code: 500, ...
-  - response body: JSON with error + time
-*/
-
 /*
 pattern: /endpoints/{id}
 method: PATCH
