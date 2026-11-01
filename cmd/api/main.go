@@ -58,7 +58,7 @@ func run(logger *slog.Logger) error {
 	router := server.NewRouter(endpointHandler)
 
 	httpServer := &http.Server{
-		Addr:              ":8080",
+		Addr:              ":8090",
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
