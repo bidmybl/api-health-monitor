@@ -66,17 +66,23 @@ func run(logger *slog.Logger) error {
 		MaxHeaderBytes:    1 << 20,
 	}
 
+	serverErr := make(chan error, 1)
+
 	go func() {
-		err := httpServer.ListenAndServe()
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("HTTP server failed", "error", err)
-		}
+		serverErr <- httpServer.ListenAndServe()
 	}()
 
 	logger.Info("HTTP server started", "address", httpServer.Addr)
 
-	<-ctx.Done()
-	logger.Info("shutdown signal received")
+	select {
+	case <-ctx.Done():
+		logger.Info("shutdown signal received")
+
+	case err := <-serverErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("HTTP server failed: %w", err)
+		}
+	}
 
 	shutdownCtx, cancel := context.WithTimeout(
 		context.Background(),
