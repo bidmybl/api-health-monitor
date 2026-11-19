@@ -3,7 +3,9 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,15 +45,34 @@ func setupTestRepository(t *testing.T) *Repository {
 	return NewRepository(pool)
 }
 
+func uniqueTestURL(t *testing.T) string {
+	t.Helper()
+
+	return fmt.Sprintf(
+		"https://example.test/%s-%d",
+		strings.ReplaceAll(t.Name(), "/", "-"),
+		time.Now().UnixNano(),
+	)
+}
+
 func TestRepositoryCreateEndpoint(t *testing.T) {
 	repo := setupTestRepository(t)
 
 	ctx := context.Background()
 	interval := 15
-	created, err := repo.Create(ctx, "https://example.test", &interval)
+
+	url := uniqueTestURL(t)
+
+	created, err := repo.Create(ctx, url, &interval)
 	if err != nil {
 		t.Fatalf("Error creating record in DB, %v", err)
 	}
+
+	t.Cleanup(func() {
+		_ = repo.DeleteEndpoint(ctx, created.ID)
+	})
+
+	// Проверка дубликата
 	_, err = repo.Create(ctx, created.URL, &interval)
 	if !errors.Is(err, ErrEndpointAlreadyExists) {
 		t.Fatalf(
@@ -61,12 +82,8 @@ func TestRepositoryCreateEndpoint(t *testing.T) {
 		)
 	}
 
-	t.Cleanup(func() {
-		_ = repo.DeleteEndpoint(ctx, created.ID)
-	})
-
-	if created.URL != "https://example.test" {
-		t.Errorf("URL = %q, want %q", created.URL, "https://example.test")
+	if created.URL != url {
+		t.Errorf("URL = %q, want %q", created.URL, url)
 	}
 
 	if created.CheckIntervalSeconds != 15 {
@@ -80,7 +97,7 @@ func TestRepositoryGetEndpointByID(t *testing.T) {
 	ctx := context.Background()
 
 	interval := 15
-	created, err := repo.Create(ctx, "https://example.test", &interval)
+	created, err := repo.Create(ctx, uniqueTestURL(t), &interval)
 	if err != nil {
 		t.Fatalf("Error creating record in DB, %v", err)
 	}
@@ -131,7 +148,7 @@ func TestRepositoryGetEndpoints(t *testing.T) {
 	ctx := context.Background()
 
 	interval := 15
-	created, err := repo.Create(ctx, "https://get-endpoints.test", &interval)
+	created, err := repo.Create(ctx, uniqueTestURL(t), &interval)
 	if err != nil {
 		t.Fatalf("Error creating record in DB, %v", err)
 	}
@@ -194,7 +211,7 @@ func TestRepositoryUpdateEndpoint(t *testing.T) {
 	ctx := context.Background()
 
 	interval := 15
-	created, err := repo.Create(ctx, "https://update-endpoints.test", &interval)
+	created, err := repo.Create(ctx, uniqueTestURL(t), &interval)
 	if err != nil {
 		t.Fatalf("Error creating record in DB, %v", err)
 	}
@@ -251,7 +268,7 @@ func TestRepositoryDeleteEndpoint(t *testing.T) {
 	ctx := context.Background()
 
 	interval := 15
-	created, err := repo.Create(ctx, "https://delete-endpoints.test", &interval)
+	created, err := repo.Create(ctx, uniqueTestURL(t), &interval)
 	if err != nil {
 		t.Fatalf("Error creating record in DB, %v", err)
 	}
