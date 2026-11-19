@@ -162,7 +162,7 @@ docker compose run --rm migrate
 DATABASE_URL='postgres://health_monitor:YOUR_PASSWORD@localhost:5432/health_monitor?sslmode=disable' go run ./cmd/api
 ```
 
-По умолчанию HTTP-сервер слушает `:8080`.
+По умолчанию HTTP-сервер слушает `:8090`.
 
 
 ## Тестирование
