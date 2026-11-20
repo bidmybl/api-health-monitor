@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS monitored_endpoints (
+CREATE TABLE monitored_endpoints (
   id bigserial PRIMARY KEY,
   url text UNIQUE NOT NULL,
   check_interval_seconds integer NOT NULL DEFAULT 60,
@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS monitored_endpoints (
   CONSTRAINT chk_interval_positive CHECK (check_interval_seconds > 0)
 );
 
-CREATE TABLE IF NOT EXISTS check_results (
+CREATE TABLE check_results (
   id bigserial PRIMARY KEY,
   endpoint_id bigint NOT NULL,
   started_at timestamptz NOT NULL DEFAULT now (),
@@ -41,4 +41,4 @@ CREATE TABLE IF NOT EXISTS check_results (
   )
 );
 
-CREATE INDEX IF NOT EXISTS idx_check_results_endpoint_started_at ON check_results (endpoint_id, started_at);
+CREATE INDEX idx_check_results_endpoint_started_at ON check_results (endpoint_id, started_at);
