@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
+	"time"
 
 	checkRepo "github.com/bidmybl/api-health-monitor/internal/features/checks/repository"
 	endpointRepo "github.com/bidmybl/api-health-monitor/internal/features/endpoints/repository"
@@ -23,6 +25,7 @@ func (f *fakeEndpointRepository) GetEndpointsDueForCheck(
 }
 
 type fakeChecksService struct {
+	mu         sync.Mutex
 	checkedIDs []int64
 	errors     map[int64]error
 }
@@ -31,13 +34,25 @@ func (f *fakeChecksService) CheckEndpoint(
 	ctx context.Context,
 	endpointID int64,
 ) (checkRepo.CheckResult, error) {
+	f.mu.Lock()
 	f.checkedIDs = append(f.checkedIDs, endpointID)
+	f.mu.Unlock()
 
 	if err := f.errors[endpointID]; err != nil {
 		return checkRepo.CheckResult{}, err
 	}
 
 	return checkRepo.CheckResult{}, nil
+}
+
+func (f *fakeChecksService) getCheckedIDs() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	ids := make([]int64, len(f.checkedIDs))
+	copy(ids, f.checkedIDs)
+
+	return ids
 }
 
 func newTestLogger() *slog.Logger {
@@ -51,39 +66,26 @@ func TestSchedulerRunDueChecks(t *testing.T) {
 		{ID: 3},
 	}
 
-	repository := &fakeEndpointRepository{
-		endpoints: endpoints,
-	}
+	repository := &fakeEndpointRepository{endpoints: endpoints}
+	service := &fakeChecksService{errors: make(map[int64]error)}
 
-	service := &fakeChecksService{
-		errors: make(map[int64]error),
-	}
-
-	scheduler := New(
-		repository,
-		service,
-		newTestLogger(),
-		0,
-	)
-
+	scheduler := New(repository, service, newTestLogger(), 0)
 	scheduler.runDueChecks(context.Background())
 
-	if len(service.checkedIDs) != len(endpoints) {
-		t.Fatalf(
-			"checked %d endpoints, want %d",
-			len(service.checkedIDs),
-			len(endpoints),
-		)
+	checkedIDs := service.getCheckedIDs()
+
+	if len(checkedIDs) != len(endpoints) {
+		t.Fatalf("checked %d endpoints, want %d", len(checkedIDs), len(endpoints))
 	}
 
-	for i, endpoint := range endpoints {
-		if service.checkedIDs[i] != endpoint.ID {
-			t.Errorf(
-				"checkedIDs[%d] = %d, want %d",
-				i,
-				service.checkedIDs[i],
-				endpoint.ID,
-			)
+	checked := make(map[int64]bool)
+	for _, id := range checkedIDs {
+		checked[id] = true
+	}
+
+	for _, endpoint := range endpoints {
+		if !checked[endpoint.ID] {
+			t.Errorf("endpoint %d was not checked", endpoint.ID)
 		}
 	}
 }
@@ -95,38 +97,97 @@ func TestSchedulerContinuesAfterCheckError(t *testing.T) {
 		{ID: 3},
 	}
 
-	repository := &fakeEndpointRepository{
-		endpoints: endpoints,
-	}
-
+	repository := &fakeEndpointRepository{endpoints: endpoints}
 	service := &fakeChecksService{
 		errors: map[int64]error{
 			2: errors.New("check failed"),
 		},
 	}
 
+	scheduler := New(repository, service, newTestLogger(), 0)
+	scheduler.runDueChecks(context.Background())
+
+	checkedIDs := service.getCheckedIDs()
+
+	if len(checkedIDs) != 3 {
+		t.Fatalf("checked %d endpoints, want 3", len(checkedIDs))
+	}
+}
+
+func TestSchedulerLimitsConcurrency(t *testing.T) {
+	const (
+		endpointCount = 12
+		maxConcurrent = 3
+	)
+
+	var (
+		mu          sync.Mutex
+		active      int
+		maxObserved int
+	)
+
+	service := &fakeChecksService{
+		errors: make(map[int64]error),
+	}
+
+	// Wrap the service to track concurrent executions.
+	trackingService := &trackingChecksService{
+		base: service,
+		check: func(ctx context.Context, endpointID int64) {
+			mu.Lock()
+			active++
+			if active > maxObserved {
+				maxObserved = active
+			}
+			mu.Unlock()
+
+			time.Sleep(20 * time.Millisecond)
+
+			mu.Lock()
+			active--
+			mu.Unlock()
+		},
+	}
+
+	endpoints := make([]endpointRepo.Endpoint, endpointCount)
+	for i := range endpoints {
+		endpoints[i].ID = int64(i + 1)
+	}
+
 	scheduler := New(
-		repository,
-		service,
+		&fakeEndpointRepository{endpoints: endpoints},
+		trackingService,
 		newTestLogger(),
 		0,
 	)
+	scheduler.maxConcurrency = maxConcurrent
 
 	scheduler.runDueChecks(context.Background())
 
-	if len(service.checkedIDs) != 3 {
-		t.Fatalf(
-			"checked %d endpoints, want 3",
-			len(service.checkedIDs),
-		)
+	if maxObserved > maxConcurrent {
+		t.Errorf("observed concurrency %d, limit is %d", maxObserved, maxConcurrent)
 	}
 
-	if service.checkedIDs[2] != 3 {
-		t.Errorf(
-			"last checked endpoint ID = %d, want 3",
-			service.checkedIDs[2],
-		)
+	if maxObserved < 2 {
+		t.Errorf("expected concurrent execution, observed %d", maxObserved)
 	}
+
+	if len(service.getCheckedIDs()) != endpointCount {
+		t.Errorf("not all endpoints were checked")
+	}
+}
+
+type trackingChecksService struct {
+	base  ChecksService
+	check func(context.Context, int64)
+}
+
+func (s *trackingChecksService) CheckEndpoint(
+	ctx context.Context,
+	endpointID int64,
+) (checkRepo.CheckResult, error) {
+	s.check(ctx, endpointID)
+	return s.base.CheckEndpoint(ctx, endpointID)
 }
 
 func TestSchedulerStopsWhenContextIsCanceled(t *testing.T) {
@@ -140,23 +201,12 @@ func TestSchedulerStopsWhenContextIsCanceled(t *testing.T) {
 		},
 	}
 
-	service := &fakeChecksService{
-		errors: make(map[int64]error),
-	}
-
-	scheduler := New(
-		repository,
-		service,
-		newTestLogger(),
-		0,
-	)
+	service := &fakeChecksService{errors: make(map[int64]error)}
+	scheduler := New(repository, service, newTestLogger(), 0)
 
 	scheduler.runDueChecks(ctx)
 
-	if len(service.checkedIDs) != 0 {
-		t.Errorf(
-			"checked %d endpoints, want 0",
-			len(service.checkedIDs),
-		)
+	if len(service.getCheckedIDs()) != 0 {
+		t.Errorf("checked endpoints after cancellation")
 	}
 }

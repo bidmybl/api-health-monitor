@@ -3,30 +3,32 @@ package scheduler
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	checkRepo "github.com/bidmybl/api-health-monitor/internal/features/checks/repository"
 	endpointRepo "github.com/bidmybl/api-health-monitor/internal/features/endpoints/repository"
 )
 
-const defaultInterval = 5 * time.Second
+const (
+	defaultInterval       = 5 * time.Second
+	defaultMaxConcurrency = 5
+)
 
 type EndpointRepository interface {
 	GetEndpointsDueForCheck(ctx context.Context) ([]endpointRepo.Endpoint, error)
 }
 
 type ChecksService interface {
-	CheckEndpoint(
-		ctx context.Context,
-		endpointID int64,
-	) (checkRepo.CheckResult, error)
+	CheckEndpoint(ctx context.Context, endpointID int64) (checkRepo.CheckResult, error)
 }
 
 type Scheduler struct {
-	endpointRepo  EndpointRepository
-	checksService ChecksService
-	logger        *slog.Logger
-	interval      time.Duration
+	endpointRepo   EndpointRepository
+	checksService  ChecksService
+	logger         *slog.Logger
+	interval       time.Duration
+	maxConcurrency int
 }
 
 func New(
@@ -44,10 +46,11 @@ func New(
 	}
 
 	return &Scheduler{
-		endpointRepo:  endpointRepo,
-		checksService: checksService,
-		logger:        logger,
-		interval:      interval,
+		endpointRepo:   endpointRepo,
+		checksService:  checksService,
+		logger:         logger,
+		interval:       interval,
+		maxConcurrency: defaultMaxConcurrency,
 	}
 }
 
@@ -57,11 +60,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 	s.logger.Info(
 		"scheduler started",
-		"interval",
-		s.interval,
+		"interval", s.interval,
+		"max_concurrency", s.maxConcurrency,
 	)
 
-	// Выполняем первую проверку сразу после запуска.
 	s.runDueChecks(ctx)
 
 	for {
@@ -69,7 +71,6 @@ func (s *Scheduler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			s.logger.Info("scheduler stopped")
 			return
-
 		case <-ticker.C:
 			s.runDueChecks(ctx)
 		}
@@ -77,6 +78,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 func (s *Scheduler) runDueChecks(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+
 	endpoints, err := s.endpointRepo.GetEndpointsDueForCheck(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -85,31 +90,56 @@ func (s *Scheduler) runDueChecks(ctx context.Context) {
 		return
 	}
 
-	for _, endpoint := range endpoints {
-		if ctx.Err() != nil {
-			return
-		}
-
-		_, err := s.checksService.CheckEndpoint(ctx, endpoint.ID)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-
-			s.logger.Error(
-				"scheduled endpoint check failed",
-				"endpoint_id",
-				endpoint.ID,
-				"error",
-				err,
-			)
-			continue
-		}
-
-		s.logger.Info(
-			"scheduled endpoint check completed",
-			"endpoint_id",
-			endpoint.ID,
-		)
+	if len(endpoints) == 0 {
+		return
 	}
+
+	workerCount := min(len(endpoints), s.maxConcurrency)
+	jobs := make(chan endpointRepo.Endpoint)
+
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+
+			for endpoint := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+
+				_, err := s.checksService.CheckEndpoint(ctx, endpoint.ID)
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+
+					s.logger.Error(
+						"scheduled endpoint check failed",
+						"endpoint_id", endpoint.ID,
+						"error", err,
+					)
+					continue
+				}
+
+				s.logger.Info(
+					"scheduled endpoint check completed",
+					"endpoint_id", endpoint.ID,
+				)
+			}
+		}()
+	}
+
+sendJobs:
+	for _, endpoint := range endpoints {
+		select {
+		case <-ctx.Done():
+			break sendJobs
+		case jobs <- endpoint:
+		}
+	}
+
+	close(jobs)
+	workers.Wait()
 }
