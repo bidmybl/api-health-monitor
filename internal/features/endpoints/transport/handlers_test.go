@@ -164,6 +164,12 @@ func TestCreateEndpoint(t *testing.T) {
 			wantCreateCall: 0,
 		},
 		{
+			name:           "URL with credentials",
+			body:           `{"url":"https://user:pass@example.com"}`,
+			wantStatus:     http.StatusBadRequest,
+			wantCreateCall: 0,
+		},
+		{
 			name:           "invalid interval",
 			body:           `{"url":"https://example.com","check_interval_seconds":-1}`,
 			wantStatus:     http.StatusBadRequest,
