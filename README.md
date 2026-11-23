@@ -1,40 +1,42 @@
 # API Health Monitor
 
-Backend-сервис на Go для управления HTTP-эндпоинтами, доступность которых планируется периодически проверять. Данные об отслеживаемых эндпоинтах и результаты проверок хранятся в PostgreSQL.
+Backend-сервис на Go для мониторинга доступности HTTP-эндпоинтов. Позволяет управлять списком отслеживаемых URL, настраивать интервалы проверок и хранить историю результатов в PostgreSQL.
 
-> **Текущий статус:** реализованы CRUD HTTP API для отслеживаемых эндпоинтов, PostgreSQL-репозиторий и начальная схема базы данных. Планировщик проверок и запись результатов проверок пока находятся в разработке.
+> **Текущий статус:** реализованы HTTP CRUD API, PostgreSQL-репозиторий, миграции, конфигурация, структурированное логирование и graceful shutdown. Периодический запуск проверок и сохранение их результатов находятся в разработке.
 
 ## Технологии
 
-- **Go 1.27.3** — основной язык разработки.
-- **net/http** — HTTP-сервер и маршрутизация.
+- **Go** — основной язык разработки.
+- **net/http** — HTTP-сервер, маршрутизация и обработчики.
 - **PostgreSQL 18** — хранение данных.
 - **pgx/v5** — PostgreSQL-драйвер и пул соединений.
 - **Docker Compose** — локальное окружение.
-- **golang-migrate** — применение SQL-миграций через Docker Compose.
+- **golang-migrate** — управление SQL-миграциями.
 - **log/slog** — структурированное логирование.
+- **testing, httptest** — тестирование.
 
-## Структура проекта
+## Архитектура проекта
 
 ```text
 .
 ├── cmd/
 │   └── api/
-│       └── main.go                 # Точка входа, инициализация и запуск приложения
+│       └── main.go
 ├── internal/
 │   ├── config/
-│   │   └── config.go               # Загрузка конфигурации из переменных окружения
+│   │   └── config.go
 │   ├── features/
 │   │   └── endpoints/
 │   │       ├── repository/
-│   │       │   ├── model.go        # Модель Endpoint
-│   │       │   ├── repository.go   # Запросы к PostgreSQL
+│   │       │   ├── model.go
+│   │       │   ├── repository.go
 │   │       │   └── repository_test.go
 │   │       └── transport/
-│   │           ├── dto.go          # DTO, валидация и JSON-хелперы
-│   │           └── handlers.go     # HTTP-обработчики эндпоинтов
+│   │           ├── dto.go
+│   │           ├── handlers.go
+│   │           └── handlers_test.go
 │   └── server/
-│       └── router.go               # Регистрация HTTP-маршрутов
+│       └── router.go
 ├── migrations/
 │   ├── 000001_create_initial_schema.up.sql
 │   └── 000001_create_initial_schema.down.sql
@@ -46,21 +48,27 @@ Backend-сервис на Go для управления HTTP-эндпоинта
 └── README.md
 ```
 
-## Функциональность API
+### Основные компоненты
+
+- **Transport** — HTTP-обработчики, DTO, валидация входных данных и формирование JSON-ответов.
+- **Repository** — взаимодействие с PostgreSQL через `pgxpool`.
+- **Server** — регистрация HTTP-маршрутов.
+- **Config** — загрузка конфигурации из переменных окружения.
+- **Main** — инициализация зависимостей, запуск HTTP-сервера и graceful shutdown.
+
+## HTTP API
 
 Базовый путь: `/endpoints`.
 
-| Метод | Путь | Описание | Успешный ответ |
+| Метод | Путь | Описание | Успешный статус |
 |---|---|---|---|
-| `POST` | `/endpoints` | Создать эндпоинт | `201 Created` |
-| `GET` | `/endpoints` | Получить список эндпоинтов | `200 OK` |
-| `GET` | `/endpoints/{id}` | Получить эндпоинт по ID | `200 OK` |
-| `PATCH` | `/endpoints/{id}` | Частично обновить эндпоинт | `200 OK` |
-| `DELETE` | `/endpoints/{id}` | Удалить эндпоинт | `204 No Content` |
+| POST | `/endpoints` | Создать эндпоинт | 201 Created |
+| GET | `/endpoints` | Получить список | 200 OK |
+| GET | `/endpoints/{id}` | Получить по ID | 200 OK |
+| PATCH | `/endpoints/{id}` | Частично обновить | 200 OK |
+| DELETE | `/endpoints/{id}` | Удалить | 204 No Content |
 
 ### Создание эндпоинта
-
-Пример запроса:
 
 ```http
 POST /endpoints
@@ -74,7 +82,9 @@ Content-Type: application/json
 }
 ```
 
-`url` обязателен и должен использовать схему `http` или `https`. `check_interval_seconds` необязателен: если поле не передано, PostgreSQL применит значение по умолчанию `60`. Если поле передано, значение должно быть положительным.
+`url` обязателен и должен использовать схему `http` или `https`.
+
+`check_interval_seconds` необязателен. Если значение не передано, используется значение по умолчанию — 60 секунд. Переданное значение должно быть положительным.
 
 ### Получение списка
 
@@ -82,18 +92,16 @@ Content-Type: application/json
 GET /endpoints
 ```
 
-Можно отфильтровать результаты по активности:
+Фильтрация по активности:
 
 ```http
 GET /endpoints?is_active=true
 GET /endpoints?is_active=false
 ```
 
-Без query-параметра возвращаются все эндпоинты.
+Если параметр не передан, возвращаются все эндпоинты.
 
 ### Частичное обновление
-
-Пример запроса:
 
 ```http
 PATCH /endpoints/1
@@ -107,11 +115,16 @@ Content-Type: application/json
 }
 ```
 
-Можно передать одно или оба поддерживаемых поля: `check_interval_seconds` и `is_active`. URL через этот метод не изменяется.
+Можно передать одно или оба поддерживаемых поля:
+
+- `check_interval_seconds`
+- `is_active`
+
+URL через PATCH не изменяется.
 
 ### Формат ошибок
 
-Ошибки API возвращаются в JSON:
+Ошибки возвращаются в JSON:
 
 ```json
 {
@@ -120,62 +133,123 @@ Content-Type: application/json
 }
 ```
 
-Основные статусы: `400 Bad Request` — некорректный запрос, `404 Not Found` — эндпоинт не найден, `409 Conflict` — URL уже существует, `500 Internal Server Error` — внутренняя ошибка.
+Основные HTTP-статусы:
+
+- `400 Bad Request` — некорректный запрос или данные.
+- `404 Not Found` — эндпоинт не найден.
+- `409 Conflict` — URL уже существует.
+- `413 Content Too Large` — тело запроса превышает допустимый размер.
+- `500 Internal Server Error` — внутренняя ошибка сервера.
+
+## База данных
+
+Используются две таблицы:
+
+### monitored_endpoints
+
+Хранит информацию об отслеживаемых эндпоинтах:
+
+- уникальный URL;
+- интервал проверки в секундах;
+- признак активности;
+- время создания и последнего обновления.
+
+### check_results
+
+Предназначена для хранения истории проверок:
+
+- ссылка на отслеживаемый эндпоинт;
+- HTTP-статус;
+- время ответа;
+- время начала и завершения проверки;
+- сообщение об ошибке;
+- вычисляемый признак успешности.
+
+Поле `is_success` вычисляется PostgreSQL на основе HTTP-статуса `2xx`. При удалении эндпоинта связанные результаты удаляются каскадно.
 
 ## Локальный запуск
 
 ### Требования
 
-- Go версии `1.27.3`.
-- Docker и Docker Compose.
-- PostgreSQL (если запускаешь приложение без Docker Compose).
+- Go (версия указана в `go.mod`);
+- Docker;
+- Docker Compose.
 
 ### Настройка окружения
 
-Создай `.env` на основе `.env.example` и задай пароль PostgreSQL и строку подключения. Не добавляй `.env` в Git: файл уже исключён через `.gitignore`.
+Создай `.env` на основе `.env.example`:
 
-Для запуска приложения непосредственно на хосте `DATABASE_URL` должен указывать на `localhost`, например:
-
-```env
-DATABASE_URL=postgres://health_monitor:YOUR_PASSWORD@localhost:5432/health_monitor?sslmode=disable
+```bash
+cp .env.example .env
 ```
 
-Для сервисов внутри Docker Compose хост базы данных — `db`:
+Укажи пароль PostgreSQL и строку подключения:
 
 ```env
-POSTGRES_PASSWORD=YOUR_PASSWORD
-DATABASE_URL=postgres://health_monitor:YOUR_PASSWORD@db:5432/health_monitor?sslmode=disable
+POSTGRES_PASSWORD=your_password
+DATABASE_URL=postgres://health_monitor:your_password@db:5432/health_monitor?sslmode=disable
+TEST_DATABASE_URL=
 ```
 
-Используй соответствующую строку подключения для выбранного способа запуска.
+Не добавляй `.env` в Git.
 
-### Запуск PostgreSQL и миграций через Docker Compose
+### Запуск через Docker Compose
+
+```bash
+docker compose up -d --build
+```
+
+Compose запустит PostgreSQL, применит миграции и после их успешного завершения запустит API.
+
+HTTP-сервер доступен на порту `8090`.
+
+Остановка:
+
+```bash
+docker compose down
+```
+
+Для остановки с удалением данных PostgreSQL:
+
+```bash
+docker compose down -v
+```
+
+### Запуск API непосредственно на хосте
+
+Можно запустить базу и миграции через Compose:
 
 ```bash
 docker compose up -d db
 docker compose run --rm migrate
 ```
 
-После успешного применения миграций запусти API на хосте:
+Затем запустить приложение локально, используя адрес PostgreSQL с `localhost`:
 
 ```bash
-DATABASE_URL='postgres://health_monitor:YOUR_PASSWORD@localhost:5432/health_monitor?sslmode=disable' go run ./cmd/api
+DATABASE_URL='postgres://health_monitor:your_password@localhost:5432/health_monitor?sslmode=disable' go run ./cmd/api
 ```
-
-По умолчанию HTTP-сервер слушает `:8090`.
-
 
 ## Тестирование
 
-Интеграционные тесты репозитория используют отдельную тестовую базу данных. Перед запуском создай отдельную БД, примени к ней миграции и укажи её URL в `TEST_DATABASE_URL`.
+В проекте используются два вида тестов:
 
-Пример:
+- **HTTP handler tests** — проверяют обработку запросов, валидацию, HTTP-статусы и ответы с помощью `httptest` и тестовой реализации репозитория.
+- **Repository integration tests** — проверяют взаимодействие с настоящей PostgreSQL.
+
+Для запуска тестов обработчиков достаточно:
 
 ```bash
-TEST_DATABASE_URL='postgres://health_monitor:YOUR_PASSWORD@localhost:5432/health_monitor_test?sslmode=disable' go test ./...
+go test ./internal/features/endpoints/transport -v
 ```
 
-Тесты пропускаются, если `TEST_DATABASE_URL` не задан. Тестовая база должна быть отдельной от основной.
+Интеграционные тесты репозитория требуют отдельной тестовой базы данных. Укажи её адрес в `TEST_DATABASE_URL`. Тесты пропускаются, если переменная не задана.
+
+Тестовая база должна быть отдельной от основной. Перед запуском интеграционных тестов на ней необходимо применить SQL-миграции.
+
+```bash
+TEST_DATABASE_URL='postgres://health_monitor:your_password@localhost:5432/health_monitor_test?sslmode=disable' go test ./...
+```
 
 Полезные команды:
 
@@ -183,18 +257,15 @@ TEST_DATABASE_URL='postgres://health_monitor:YOUR_PASSWORD@localhost:5432/health
 gofmt -w ./cmd ./internal
 go vet ./...
 go test ./...
+go test -race ./...
 ```
 
-## Схема базы данных
+## Дальнейшее развитие
 
-- `monitored_endpoints` — отслеживаемые URL, интервал проверки, признак активности и временные метки.
-- `check_results` — история результатов проверок: HTTP-статус, время ответа, время начала и завершения, сообщение об ошибке.
-
-Для `check_results` поле `is_success` вычисляется PostgreSQL на основе HTTP-статуса `2xx`. Удаление эндпоинта каскадно удаляет связанные результаты проверок.
-
-## Дальнейшие задачи
-
-- Реализовать периодический запуск проверок активных эндпоинтов.
+- Реализовать HTTP Checker для проверки доступности эндпоинтов.
+- Добавить обработку таймаутов и сетевых ошибок.
 - Сохранять результаты проверок в `check_results`.
-- Продумать обработку таймаутов и сетевых ошибок.
-- Добавить тесты HTTP-обработчиков и graceful shutdown.
+- Реализовать периодический запуск проверок активных эндпоинтов.
+- Добавить worker pool для параллельного выполнения проверок.
+- Реализовать API для получения истории проверок.
+- Добавить CI для автоматического запуска тестов.
