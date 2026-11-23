@@ -3,10 +3,14 @@ package server
 import (
 	"net/http"
 
+	checksTransport "github.com/bidmybl/api-health-monitor/internal/features/checks/transport"
 	endpointTransport "github.com/bidmybl/api-health-monitor/internal/features/endpoints/transport"
 )
 
-func NewRouter(endpointHandler *endpointTransport.Handler) http.Handler {
+func NewRouter(
+	endpointHandler *endpointTransport.Handler,
+	checksHandler *checksTransport.Handler,
+) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /endpoints", endpointHandler.CreateEndpoint)
@@ -14,6 +18,9 @@ func NewRouter(endpointHandler *endpointTransport.Handler) http.Handler {
 	mux.HandleFunc("GET /endpoints", endpointHandler.GetAllEndpoints)
 	mux.HandleFunc("PATCH /endpoints/{id}", endpointHandler.UpdateEndpoint)
 	mux.HandleFunc("DELETE /endpoints/{id}", endpointHandler.DeleteEndpoint)
+
+	mux.HandleFunc("POST /endpoints/{id}/checks", checksHandler.CheckEndpoint)
+	mux.HandleFunc("GET /endpoints/{id}/checks", checksHandler.GetCheckHistory)
 
 	return mux
 }

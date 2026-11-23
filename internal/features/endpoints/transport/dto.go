@@ -69,6 +69,10 @@ func validateURL(rawURL string) bool {
 		return false
 	}
 
+	if u.User != nil {
+		return false
+	}
+
 	return true
 }
 

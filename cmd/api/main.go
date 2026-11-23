@@ -12,8 +12,12 @@ import (
 	"time"
 
 	"github.com/bidmybl/api-health-monitor/internal/config"
-	"github.com/bidmybl/api-health-monitor/internal/features/endpoints/repository"
-	"github.com/bidmybl/api-health-monitor/internal/features/endpoints/transport"
+	"github.com/bidmybl/api-health-monitor/internal/features/checks/checker"
+	checkRepo "github.com/bidmybl/api-health-monitor/internal/features/checks/repository"
+	checkService "github.com/bidmybl/api-health-monitor/internal/features/checks/service"
+	checksTransport "github.com/bidmybl/api-health-monitor/internal/features/checks/transport"
+	endpointRepo "github.com/bidmybl/api-health-monitor/internal/features/endpoints/repository"
+	endpointTransport "github.com/bidmybl/api-health-monitor/internal/features/endpoints/transport"
 	"github.com/bidmybl/api-health-monitor/internal/server"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -52,17 +56,38 @@ func run(logger *slog.Logger) error {
 
 	logger.Info("connected to PostgreSQL")
 
-	endpointRepo := repository.NewRepository(pool)
-	endpointHandler := transport.NewHandler(endpointRepo, logger)
+	endpointRepository := endpointRepo.NewRepository(pool)
+	checkRepository := checkRepo.NewRepository(pool)
 
-	router := server.NewRouter(endpointHandler)
+	endpointHandler := endpointTransport.NewHandler(
+		endpointRepository,
+		logger,
+	)
+
+	httpChecker := checker.NewChecker(10 * time.Second)
+
+	checksService := checkService.NewService(
+		endpointRepository,
+		httpChecker,
+		checkRepository,
+	)
+
+	checksHandler := checksTransport.NewHandler(
+		checksService,
+		logger,
+	)
+
+	router := server.NewRouter(
+		endpointHandler,
+		checksHandler,
+	)
 
 	httpServer := &http.Server{
 		Addr:              ":8090",
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
@@ -94,6 +119,7 @@ func run(logger *slog.Logger) error {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown HTTP server: %w", err)
 	}
+
 	logger.Info("HTTP server stopped")
 	return nil
 }
