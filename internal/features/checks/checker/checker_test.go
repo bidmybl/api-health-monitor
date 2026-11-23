@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -168,5 +169,38 @@ func TestCheckerDoesNotFollowRedirects(t *testing.T) {
 
 	if targetRequests.Load() != 0 {
 		t.Errorf("redirect target received %d requests, want 0", targetRequests.Load())
+	}
+}
+
+func TestCheckerTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	checker := NewChecker(50 * time.Millisecond)
+
+	result := checker.Check(context.Background(), server.URL)
+
+	if result.HTTPStatusCode != nil {
+		t.Fatalf("HTTPStatusCode = %d, want nil", *result.HTTPStatusCode)
+	}
+
+	if result.ErrorMessage == nil {
+		t.Fatal("ErrorMessage = nil, want timeout error")
+	}
+
+	if !strings.Contains(strings.ToLower(*result.ErrorMessage), "timeout") {
+		t.Errorf("ErrorMessage = %q, want timeout error", *result.ErrorMessage)
+	}
+
+	if result.CompletedAt.Before(result.StartedAt) {
+		t.Errorf("CompletedAt = %v, before StartedAt = %v",
+			result.CompletedAt, result.StartedAt)
+	}
+
+	if result.ResponseTimeMS < 0 || result.ResponseTimeMS >= 200 {
+		t.Errorf("ResponseTimeMS = %d, want value between 0 and 200", result.ResponseTimeMS)
 	}
 }
