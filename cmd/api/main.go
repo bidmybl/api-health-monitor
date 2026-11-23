@@ -12,10 +12,11 @@ import (
 	"time"
 
 	"github.com/bidmybl/api-health-monitor/internal/config"
-	"github.com/bidmybl/api-health-monitor/internal/features/checks/checker"
+	checker "github.com/bidmybl/api-health-monitor/internal/features/checks/checker"
 	checkRepo "github.com/bidmybl/api-health-monitor/internal/features/checks/repository"
+	checkScheduler "github.com/bidmybl/api-health-monitor/internal/features/checks/scheduler"
 	checkService "github.com/bidmybl/api-health-monitor/internal/features/checks/service"
-	checksTransport "github.com/bidmybl/api-health-monitor/internal/features/checks/transport"
+	checkTransport "github.com/bidmybl/api-health-monitor/internal/features/checks/transport"
 	endpointRepo "github.com/bidmybl/api-health-monitor/internal/features/endpoints/repository"
 	endpointTransport "github.com/bidmybl/api-health-monitor/internal/features/endpoints/transport"
 	"github.com/bidmybl/api-health-monitor/internal/server"
@@ -51,7 +52,7 @@ func run(logger *slog.Logger) error {
 	defer pool.Close()
 
 	if err := pool.Ping(ctx); err != nil {
-		return fmt.Errorf("ping database: %w", err)
+		return fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
 
 	logger.Info("connected to PostgreSQL")
@@ -59,28 +60,17 @@ func run(logger *slog.Logger) error {
 	endpointRepository := endpointRepo.NewRepository(pool)
 	checkRepository := checkRepo.NewRepository(pool)
 
-	endpointHandler := endpointTransport.NewHandler(
-		endpointRepository,
-		logger,
-	)
+	endpointHandler := endpointTransport.NewHandler(endpointRepository, logger)
 
 	httpChecker := checker.NewChecker(10 * time.Second)
-
 	checksService := checkService.NewService(
 		endpointRepository,
 		httpChecker,
 		checkRepository,
 	)
+	checksHandler := checkTransport.NewHandler(checksService, logger)
 
-	checksHandler := checksTransport.NewHandler(
-		checksService,
-		logger,
-	)
-
-	router := server.NewRouter(
-		endpointHandler,
-		checksHandler,
-	)
+	router := server.NewRouter(endpointHandler, checksHandler)
 
 	httpServer := &http.Server{
 		Addr:              ":8090",
@@ -91,6 +81,26 @@ func run(logger *slog.Logger) error {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+
+	checksScheduler := checkScheduler.New(
+		endpointRepository,
+		checksService,
+		logger,
+		5*time.Second,
+	)
+
+	schedulerDone := make(chan struct{})
+
+	go func() {
+		defer close(schedulerDone)
+		checksScheduler.Run(ctx)
+	}()
+
+	// Ensure the scheduler stops before the database pool is closed.
+	defer func() {
+		cancel()
+		<-schedulerDone
+	}()
 
 	serverErr := make(chan error, 1)
 
@@ -110,16 +120,17 @@ func run(logger *slog.Logger) error {
 		}
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(
+	shutdownCtx, shutdownCancel := context.WithTimeout(
 		context.Background(),
 		10*time.Second,
 	)
-	defer cancel()
+	defer shutdownCancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown HTTP server: %w", err)
 	}
 
 	logger.Info("HTTP server stopped")
+
 	return nil
 }
