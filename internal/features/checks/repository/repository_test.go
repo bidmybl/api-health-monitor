@@ -2,12 +2,14 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bidmybl/api-health-monitor/internal/features/checks"
@@ -90,8 +92,8 @@ func TestRepositoryCreate(t *testing.T) {
 	repo, pool := setupTestRepository(t)
 	endpointID := createTestEndpoint(t, pool)
 
-	startedAt := time.Now().Add(-time.Second)
-	completedAt := time.Now()
+	startedAt := time.Now().Add(-time.Second).Truncate(time.Microsecond)
+	completedAt := time.Now().Truncate(time.Microsecond)
 
 	statusOK := 200
 	statusInternalError := 500
@@ -231,8 +233,14 @@ func TestRepositoryCreateWithNonExistingEndpoint(t *testing.T) {
 		-1,
 		result,
 	)
-	if err == nil {
-		t.Fatal("expected foreign key error, got nil")
+	var pgErr *pgconn.PgError
+
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("expected PostgreSQL error, got %v", err)
+	}
+
+	if pgErr.Code != "23503" {
+		t.Errorf("error code = %s, want 23503 (foreign_key_violation)", pgErr.Code)
 	}
 }
 
