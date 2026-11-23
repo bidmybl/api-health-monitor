@@ -24,6 +24,15 @@ func (f *fakeEndpointRepository) GetEndpointsDueForCheck(
 	return f.endpoints, f.err
 }
 
+func (f *fakeEndpointRepository) TryAcquireCheckLock(
+	ctx context.Context,
+	endpointID int64,
+) (func(context.Context) error, bool, error) {
+	return func(context.Context) error {
+		return nil
+	}, true, nil
+}
+
 type fakeChecksService struct {
 	mu         sync.Mutex
 	checkedIDs []int64

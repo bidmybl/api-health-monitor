@@ -17,6 +17,7 @@ const (
 
 type EndpointRepository interface {
 	GetEndpointsDueForCheck(ctx context.Context) ([]endpointRepo.Endpoint, error)
+	TryAcquireCheckLock(ctx context.Context, endpointID int64) (func(context.Context) error, bool, error)
 }
 
 type ChecksService interface {
@@ -109,24 +110,32 @@ func (s *Scheduler) runDueChecks(ctx context.Context) {
 					return
 				}
 
-				_, err := s.checksService.CheckEndpoint(ctx, endpoint.ID)
+				release, acquired, err := s.endpointRepo.TryAcquireCheckLock(
+					ctx,
+					endpoint.ID,
+				)
 				if err != nil {
 					if ctx.Err() != nil {
 						return
 					}
 
 					s.logger.Error(
-						"scheduled endpoint check failed",
+						"acquire endpoint check lock",
 						"endpoint_id", endpoint.ID,
 						"error", err,
 					)
 					continue
 				}
 
-				s.logger.Info(
-					"scheduled endpoint check completed",
-					"endpoint_id", endpoint.ID,
-				)
+				if !acquired {
+					s.logger.Debug(
+						"scheduled endpoint check skipped; already running",
+						"endpoint_id", endpoint.ID,
+					)
+					continue
+				}
+
+				s.checkEndpoint(ctx, endpoint.ID, release)
 			}
 		}()
 	}
@@ -142,4 +151,45 @@ sendJobs:
 
 	close(jobs)
 	workers.Wait()
+}
+
+func (s *Scheduler) checkEndpoint(
+	ctx context.Context,
+	endpointID int64,
+	release func(context.Context) error,
+) {
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(
+			context.Background(),
+			2*time.Second,
+		)
+		defer cancel()
+
+		if err := release(releaseCtx); err != nil {
+			s.logger.Error(
+				"release endpoint check lock",
+				"endpoint_id", endpointID,
+				"error", err,
+			)
+		}
+	}()
+
+	_, err := s.checksService.CheckEndpoint(ctx, endpointID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+
+		s.logger.Error(
+			"scheduled endpoint check failed",
+			"endpoint_id", endpointID,
+			"error", err,
+		)
+		return
+	}
+
+	s.logger.Info(
+		"scheduled endpoint check completed",
+		"endpoint_id", endpointID,
+	)
 }
