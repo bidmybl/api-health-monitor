@@ -233,6 +233,7 @@ func TestRepositoryCreateWithNonExistingEndpoint(t *testing.T) {
 		-1,
 		result,
 	)
+
 	var pgErr *pgconn.PgError
 
 	if !errors.As(err, &pgErr) {
@@ -242,6 +243,119 @@ func TestRepositoryCreateWithNonExistingEndpoint(t *testing.T) {
 	if pgErr.Code != "23503" {
 		t.Errorf("error code = %s, want 23503 (foreign_key_violation)", pgErr.Code)
 	}
+}
+
+func TestRepositoryGetByEndpointID(t *testing.T) {
+	repo, pool := setupTestRepository(t)
+
+	endpointID := createTestEndpoint(t, pool)
+	otherEndpointID := createTestEndpoint(t, pool)
+	emptyEndpointID := createTestEndpoint(t, pool)
+
+	ctx := context.Background()
+	baseTime := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Hour)
+	statusOK := 200
+
+	createdResults := make([]CheckResult, 0, 3)
+
+	for i := 0; i < 3; i++ {
+		startedAt := baseTime.Add(time.Duration(i) * time.Minute)
+
+		result, err := repo.Create(
+			ctx,
+			endpointID,
+			checks.Result{
+				HTTPStatusCode: &statusOK,
+				ResponseTimeMS: 100 + i,
+				StartedAt:      startedAt,
+				CompletedAt:    startedAt.Add(100 * time.Millisecond),
+			},
+		)
+		if err != nil {
+			t.Fatalf("create check result %d: %v", i, err)
+		}
+
+		createdResults = append(createdResults, result)
+	}
+
+	otherStartedAt := baseTime.Add(10 * time.Minute)
+
+	_, err := repo.Create(
+		ctx,
+		otherEndpointID,
+		checks.Result{
+			HTTPStatusCode: &statusOK,
+			ResponseTimeMS: 200,
+			StartedAt:      otherStartedAt,
+			CompletedAt:    otherStartedAt.Add(100 * time.Millisecond),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create check result for another endpoint: %v", err)
+	}
+
+	t.Run("returns newest results first and respects limit", func(t *testing.T) {
+		got, err := repo.GetByEndpointID(ctx, endpointID, 2)
+		if err != nil {
+			t.Fatalf("GetByEndpointID() error = %v", err)
+		}
+
+		if len(got) != 2 {
+			t.Fatalf("results length = %d, want 2", len(got))
+		}
+
+		wantIDs := []int64{
+			createdResults[2].ID,
+			createdResults[1].ID,
+		}
+
+		for i, wantID := range wantIDs {
+			if got[i].ID != wantID {
+				t.Errorf(
+					"results[%d].ID = %d, want %d",
+					i,
+					got[i].ID,
+					wantID,
+				)
+			}
+		}
+
+		for _, result := range got {
+			if result.EndpointID != endpointID {
+				t.Errorf(
+					"EndpointID = %d, want %d",
+					result.EndpointID,
+					endpointID,
+				)
+			}
+		}
+	})
+
+	t.Run("returns all available results when limit is larger", func(t *testing.T) {
+		got, err := repo.GetByEndpointID(ctx, endpointID, 10)
+		if err != nil {
+			t.Fatalf("GetByEndpointID() error = %v", err)
+		}
+
+		if len(got) != 3 {
+			t.Fatalf("results length = %d, want 3", len(got))
+		}
+	})
+
+	t.Run("returns empty history", func(t *testing.T) {
+		got, err := repo.GetByEndpointID(ctx, emptyEndpointID, 20)
+		if err != nil {
+			t.Fatalf("GetByEndpointID() error = %v", err)
+		}
+
+		if got == nil {
+			t.Fatal("results = nil, want empty slice")
+		}
+
+		if len(got) != 0 {
+			t.Errorf("results length = %d, want 0", len(got))
+		}
+	})
 }
 
 func stringPointer(value string) *string {
