@@ -50,10 +50,21 @@ failed:
 func (h *Handler) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 	var request CreateEndpointDTO
 	if err := decodeJSON(w, r, &request); err != nil {
-		h.logger.Warn("invalid JSON body", "error", err)
-		h.writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
+    var maxBytesError *http.MaxBytesError
+
+    if errors.As(err, &maxBytesError) {
+        h.writeError(
+            w,
+            http.StatusRequestEntityTooLarge,
+            "request body too large",
+        )
+        return
+    }
+
+    h.logger.Warn("invalid JSON body", "error", err)
+    h.writeError(w, http.StatusBadRequest, "invalid JSON body")
+    return
+}
 
 	if !validateURL(request.URL) {
 		h.writeError(w, http.StatusBadRequest, "invalid URL")
@@ -207,13 +218,21 @@ func (h *Handler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	var request UpdateEndpointDTO
 	if err := decodeJSON(w, r, &request); err != nil {
-		h.writeError(
-			w,
-			http.StatusBadRequest,
-			"invalid JSON body",
-		)
-		return
-	}
+    var maxBytesError *http.MaxBytesError
+
+    if errors.As(err, &maxBytesError) {
+        h.writeError(
+            w,
+            http.StatusRequestEntityTooLarge,
+            "request body too large",
+        )
+        return
+    }
+
+    h.logger.Warn("invalid JSON body", "error", err)
+    h.writeError(w, http.StatusBadRequest, "invalid JSON body")
+    return
+}
 
 	if request.CheckIntervalSeconds == nil && request.IsActive == nil {
 		h.writeError(w, http.StatusBadRequest, "no fields to update")
