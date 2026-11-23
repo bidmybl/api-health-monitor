@@ -2,8 +2,10 @@ package checker
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -42,7 +44,7 @@ func TestCheckerCheck(t *testing.T) {
 			)
 			defer server.Close()
 
-			c := NewChecker(time.Second)
+			c := newTestChecker(time.Second)
 			result := c.Check(context.Background(), server.URL)
 
 			if result.HTTPStatusCode == nil {
@@ -77,7 +79,7 @@ func TestCheckerNetworkError(t *testing.T) {
 	serverURL := server.URL
 	server.Close()
 
-	c := NewChecker(time.Second)
+	c := newTestChecker(time.Second)
 	result := c.Check(context.Background(), serverURL)
 
 	if result.HTTPStatusCode != nil {
@@ -97,7 +99,7 @@ func TestCheckerInvalidURL(t *testing.T) {
 		"http://user:password@example.com",
 	}
 
-	c := NewChecker(time.Second)
+	c := newTestChecker(time.Second)
 
 	for _, rawURL := range tests {
 		t.Run(rawURL, func(t *testing.T) {
@@ -126,7 +128,7 @@ func TestCheckerContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	c := NewChecker(time.Second)
+	c := newTestChecker(time.Second)
 	result := c.Check(ctx, server.URL)
 
 	if result.ErrorMessage == nil {
@@ -152,7 +154,7 @@ func TestCheckerDoesNotFollowRedirects(t *testing.T) {
 	)
 	defer source.Close()
 
-	c := NewChecker(time.Second)
+	c := newTestChecker(time.Second)
 	result := c.Check(context.Background(), source.URL)
 
 	if result.HTTPStatusCode == nil {
@@ -179,7 +181,7 @@ func TestCheckerTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	checker := NewChecker(50 * time.Millisecond)
+	checker := newTestChecker(50 * time.Millisecond)
 
 	result := checker.Check(context.Background(), server.URL)
 
@@ -203,4 +205,18 @@ func TestCheckerTimeout(t *testing.T) {
 	if result.ResponseTimeMS < 0 || result.ResponseTimeMS >= 200 {
 		t.Errorf("ResponseTimeMS = %d, want value between 0 and 200", result.ResponseTimeMS)
 	}
+}
+
+func newTestChecker(timeout time.Duration) *Checker {
+	dialer := &net.Dialer{}
+
+	safe := &safeDialer{
+		resolver: net.DefaultResolver,
+		dial:     dialer.DialContext,
+		isPublicIP: func(netip.Addr) bool {
+			return true
+		},
+	}
+
+	return newChecker(timeout, safe)
 }

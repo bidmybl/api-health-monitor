@@ -22,13 +22,23 @@ type Checker struct {
 }
 
 func NewChecker(timeout time.Duration) *Checker {
+	return newChecker(timeout, newSafeDialer())
+}
+
+func newChecker(timeout time.Duration, dialer *safeDialer) *Checker {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
 
+	transport := &http.Transport{
+		Proxy:       nil,
+		DialContext: dialer.DialContext,
+	}
+
 	return &Checker{
 		client: &http.Client{
-			Timeout: timeout,
+			Transport: transport,
+			Timeout:   timeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
