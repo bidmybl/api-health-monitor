@@ -61,7 +61,9 @@ func (c *Checker) Check(ctx context.Context, rawURL string) checks.Result {
 	if err != nil {
 		return c.finishWithError(result, startedAt, err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 
 	statusCode := response.StatusCode
 	result.HTTPStatusCode = &statusCode
