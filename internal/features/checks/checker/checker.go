@@ -111,13 +111,13 @@ func (c *Checker) finishWithError(
 }
 
 func (c *Checker) finish(
-    result checks.Result,
-    startedAt time.Time,
+	result checks.Result,
+	startedAt time.Time,
 ) checks.Result {
-    elapsed := time.Since(startedAt)
+	elapsed := time.Since(startedAt)
 
-    result.CompletedAt = startedAt.Add(elapsed)
-    result.ResponseTimeMS = int(elapsed.Milliseconds())
+	result.CompletedAt = startedAt.Add(elapsed)
+	result.ResponseTimeMS = int(elapsed.Milliseconds())
 
-    return result
+	return result
 }
