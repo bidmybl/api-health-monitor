@@ -220,3 +220,50 @@ func newTestChecker(timeout time.Duration) *Checker {
 
 	return newChecker(timeout, safe)
 }
+
+func TestCheckerRejectsPrivateResolvedIP(t *testing.T) {
+	resolver := &fakeResolver{
+		ips: []netip.Addr{
+			netip.MustParseAddr("127.0.0.1"),
+		},
+	}
+
+	dialCalled := false
+
+	dialer := &safeDialer{
+		resolver: resolver,
+		isPublicIP: func(ip netip.Addr) bool {
+			return isPublicIP(ip)
+		},
+		dial: func(
+			context.Context,
+			string,
+			string,
+		) (net.Conn, error) {
+			dialCalled = true
+			t.Fatal("dial must not be called for a private IP")
+			return nil, nil
+		},
+	}
+
+	c := newChecker(time.Second, dialer)
+	result := c.Check(
+		context.Background(),
+		"http://example.test",
+	)
+
+	if result.ErrorMessage == nil {
+		t.Fatal("expected SSRF protection error, got nil")
+	}
+
+	if result.HTTPStatusCode != nil {
+		t.Errorf(
+			"HTTPStatusCode = %d, want nil",
+			*result.HTTPStatusCode,
+		)
+	}
+
+	if dialCalled {
+		t.Fatal("dial was called for a private IP")
+	}
+}
