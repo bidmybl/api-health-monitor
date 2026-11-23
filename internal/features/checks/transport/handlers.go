@@ -13,11 +13,22 @@ import (
 	endpointRepo "github.com/bidmybl/api-health-monitor/internal/features/endpoints/repository"
 )
 
+const (
+	defaultHistoryLimit = 20
+	maxHistoryLimit     = 100
+)
+
 type CheckService interface {
 	CheckEndpoint(
 		ctx context.Context,
 		endpointID int64,
 	) (checkRepo.CheckResult, error)
+
+	GetCheckHistory(
+		ctx context.Context,
+		endpointID int64,
+		limit int,
+	) ([]checkRepo.CheckResult, error)
 }
 
 type Handler struct {
@@ -75,7 +86,70 @@ func (h *Handler) CheckEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := CheckResultResponse{
+	response := toCheckResultResponse(result)
+
+	if err := writeJSON(w, http.StatusOK, response); err != nil {
+		h.logger.Error(
+			"failed to write check result response",
+			"error", err,
+			"endpoint_id", id,
+		)
+	}
+}
+
+func (h *Handler) GetCheckHistory(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		h.writeError(w, http.StatusBadRequest, "invalid endpoint ID")
+		return
+	}
+
+	limit := defaultHistoryLimit
+
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		limit, err = strconv.Atoi(rawLimit)
+		if err != nil || limit < 1 || limit > maxHistoryLimit {
+			h.writeError(
+				w,
+				http.StatusBadRequest,
+				"limit must be between 1 and 100",
+			)
+			return
+		}
+	}
+
+	results, err := h.service.GetCheckHistory(r.Context(), id, limit)
+	if err != nil {
+		if errors.Is(err, endpointRepo.ErrEndpointNotFound) {
+			h.writeError(w, http.StatusNotFound, "endpoint not found")
+			return
+		}
+
+		h.logger.Error(
+			"failed to get check history",
+			"error", err,
+			"endpoint_id", id,
+		)
+		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	response := make([]CheckResultResponse, 0, len(results))
+	for _, result := range results {
+		response = append(response, toCheckResultResponse(result))
+	}
+
+	if err := writeJSON(w, http.StatusOK, response); err != nil {
+		h.logger.Error(
+			"failed to write check history response",
+			"error", err,
+			"endpoint_id", id,
+		)
+	}
+}
+
+func toCheckResultResponse(result checkRepo.CheckResult) CheckResultResponse {
+	return CheckResultResponse{
 		ID:             result.ID,
 		EndpointID:     result.EndpointID,
 		StartedAt:      result.StartedAt,
@@ -84,14 +158,6 @@ func (h *Handler) CheckEndpoint(w http.ResponseWriter, r *http.Request) {
 		ResponseTimeMS: result.ResponseTimeMS,
 		IsSuccess:      result.IsSuccess,
 		ErrorMessage:   result.ErrorMessage,
-	}
-
-	if err := writeJSON(w, http.StatusOK, response); err != nil {
-		h.logger.Error(
-			"failed to write check result response",
-			"error", err,
-			"endpoint_id", id,
-		)
 	}
 }
 

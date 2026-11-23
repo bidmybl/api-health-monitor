@@ -12,8 +12,6 @@ import (
 	endpointRepo "github.com/bidmybl/api-health-monitor/internal/features/endpoints/repository"
 )
 
-// Fake endpoint repository
-
 type fakeEndpointRepository struct {
 	endpoint endpointRepo.Endpoint
 	err      error
@@ -33,8 +31,6 @@ func (f *fakeEndpointRepository) GetEndpointByID(
 	return f.endpoint, nil
 }
 
-// Fake checker
-
 type fakeChecker struct {
 	result checks.Result
 	calls  int
@@ -51,14 +47,18 @@ func (f *fakeChecker) Check(
 	return f.result
 }
 
-// Fake check repository
-
 type fakeCheckRepository struct {
 	result     checkRepo.CheckResult
 	err        error
 	calls      int
 	endpointID int64
 	input      checks.Result
+
+	history           []checkRepo.CheckResult
+	historyErr        error
+	historyCalls      int
+	historyEndpointID int64
+	historyLimit      int
 }
 
 func (f *fakeCheckRepository) Create(
@@ -77,7 +77,21 @@ func (f *fakeCheckRepository) Create(
 	return f.result, nil
 }
 
-// Tests
+func (f *fakeCheckRepository) GetByEndpointID(
+	ctx context.Context,
+	endpointID int64,
+	limit int,
+) ([]checkRepo.CheckResult, error) {
+	f.historyCalls++
+	f.historyEndpointID = endpointID
+	f.historyLimit = limit
+
+	if f.historyErr != nil {
+		return nil, f.historyErr
+	}
+
+	return f.history, nil
+}
 
 func TestServiceCheckEndpoint(t *testing.T) {
 	now := time.Now()
@@ -137,10 +151,7 @@ func TestServiceCheckEndpoint(t *testing.T) {
 	}
 
 	if endpointRepository.calls != 1 {
-		t.Errorf(
-			"endpointRepository calls = %d, want 1",
-			endpointRepository.calls,
-		)
+		t.Errorf("endpointRepository calls = %d, want 1", endpointRepository.calls)
 	}
 
 	if checker.calls != 1 {
@@ -152,10 +163,7 @@ func TestServiceCheckEndpoint(t *testing.T) {
 	}
 
 	if checkRepository.calls != 1 {
-		t.Errorf(
-			"checkRepository calls = %d, want 1",
-			checkRepository.calls,
-		)
+		t.Errorf("checkRepository calls = %d, want 1", checkRepository.calls)
 	}
 
 	if checkRepository.endpointID != endpoint.ID {
@@ -181,7 +189,6 @@ func TestServiceCheckEndpointWhenEndpointNotFound(t *testing.T) {
 	}
 
 	checker := &fakeChecker{}
-
 	checkRepository := &fakeCheckRepository{}
 
 	svc := NewService(
@@ -193,18 +200,11 @@ func TestServiceCheckEndpointWhenEndpointNotFound(t *testing.T) {
 	_, err := svc.CheckEndpoint(context.Background(), 999)
 
 	if !errors.Is(err, endpointRepo.ErrEndpointNotFound) {
-		t.Errorf(
-			"error = %v, want %v",
-			err,
-			endpointRepo.ErrEndpointNotFound,
-		)
+		t.Errorf("error = %v, want %v", err, endpointRepo.ErrEndpointNotFound)
 	}
 
 	if endpointRepository.calls != 1 {
-		t.Errorf(
-			"endpointRepository calls = %d, want 1",
-			endpointRepository.calls,
-		)
+		t.Errorf("endpointRepository calls = %d, want 1", endpointRepository.calls)
 	}
 
 	if checker.calls != 0 {
@@ -259,10 +259,7 @@ func TestServiceCheckEndpointWhenSavingFails(t *testing.T) {
 	}
 
 	if endpointRepository.calls != 1 {
-		t.Errorf(
-			"endpointRepository calls = %d, want 1",
-			endpointRepository.calls,
-		)
+		t.Errorf("endpointRepository calls = %d, want 1", endpointRepository.calls)
 	}
 
 	if checker.calls != 1 {
@@ -270,9 +267,147 @@ func TestServiceCheckEndpointWhenSavingFails(t *testing.T) {
 	}
 
 	if checkRepository.calls != 1 {
+		t.Errorf("checkRepository calls = %d, want 1", checkRepository.calls)
+	}
+}
+
+func TestServiceGetCheckHistory(t *testing.T) {
+	endpoint := endpointRepo.Endpoint{
+		ID:  42,
+		URL: "https://example.com",
+	}
+
+	now := time.Now()
+	statusCode := http.StatusOK
+
+	history := []checkRepo.CheckResult{
+		{
+			ID:             2,
+			EndpointID:     endpoint.ID,
+			StartedAt:      now,
+			CompletedAt:    now.Add(100 * time.Millisecond),
+			HTTPStatusCode: &statusCode,
+			ResponseTimeMS: 100,
+			IsSuccess:      true,
+		},
+		{
+			ID:             1,
+			EndpointID:     endpoint.ID,
+			StartedAt:      now.Add(-time.Minute),
+			CompletedAt:    now.Add(-time.Minute + 100*time.Millisecond),
+			HTTPStatusCode: &statusCode,
+			ResponseTimeMS: 100,
+			IsSuccess:      true,
+		},
+	}
+
+	endpointRepository := &fakeEndpointRepository{
+		endpoint: endpoint,
+	}
+
+	checkRepository := &fakeCheckRepository{
+		history: history,
+	}
+
+	svc := NewService(
+		endpointRepository,
+		&fakeChecker{},
+		checkRepository,
+	)
+
+	result, err := svc.GetCheckHistory(context.Background(), endpoint.ID, 10)
+	if err != nil {
+		t.Fatalf("GetCheckHistory() error = %v", err)
+	}
+
+	if len(result) != len(history) {
+		t.Fatalf("result length = %d, want %d", len(result), len(history))
+	}
+
+	if result[0].ID != history[0].ID {
+		t.Errorf("result[0].ID = %d, want %d", result[0].ID, history[0].ID)
+	}
+
+	if endpointRepository.calls != 1 {
+		t.Errorf("endpointRepository calls = %d, want 1", endpointRepository.calls)
+	}
+
+	if checkRepository.historyCalls != 1 {
+		t.Errorf("checkRepository history calls = %d, want 1", checkRepository.historyCalls)
+	}
+
+	if checkRepository.historyEndpointID != endpoint.ID {
 		t.Errorf(
-			"checkRepository calls = %d, want 1",
-			checkRepository.calls,
+			"history endpoint ID = %d, want %d",
+			checkRepository.historyEndpointID,
+			endpoint.ID,
 		)
+	}
+
+	if checkRepository.historyLimit != 10 {
+		t.Errorf("history limit = %d, want 10", checkRepository.historyLimit)
+	}
+}
+
+func TestServiceGetCheckHistoryWhenEndpointNotFound(t *testing.T) {
+	endpointRepository := &fakeEndpointRepository{
+		err: endpointRepo.ErrEndpointNotFound,
+	}
+
+	checkRepository := &fakeCheckRepository{}
+
+	svc := NewService(
+		endpointRepository,
+		&fakeChecker{},
+		checkRepository,
+	)
+
+	_, err := svc.GetCheckHistory(context.Background(), 999, 10)
+
+	if !errors.Is(err, endpointRepo.ErrEndpointNotFound) {
+		t.Errorf("error = %v, want %v", err, endpointRepo.ErrEndpointNotFound)
+	}
+
+	if endpointRepository.calls != 1 {
+		t.Errorf("endpointRepository calls = %d, want 1", endpointRepository.calls)
+	}
+
+	if checkRepository.historyCalls != 0 {
+		t.Errorf("checkRepository history calls = %d, want 0", checkRepository.historyCalls)
+	}
+}
+
+func TestServiceGetCheckHistoryWhenRepositoryFails(t *testing.T) {
+	dbErr := errors.New("database unavailable")
+
+	endpointRepository := &fakeEndpointRepository{
+		endpoint: endpointRepo.Endpoint{
+			ID:  42,
+			URL: "https://example.com",
+		},
+	}
+
+	checkRepository := &fakeCheckRepository{
+		historyErr: dbErr,
+	}
+
+	svc := NewService(
+		endpointRepository,
+		&fakeChecker{},
+		checkRepository,
+	)
+
+	_, err := svc.GetCheckHistory(context.Background(), 42, 10)
+
+	if !errors.Is(err, dbErr) {
+		t.Errorf("error = %v, want %v", err, dbErr)
+	}
+
+	if endpointRepository.calls != 1 {
+		t.Errorf("endpointRepository calls = %d, want 1", endpointRepository.calls)
+	}
+
+	if checkRepository.historyCalls != 1 {
+		t.Errorf("checkRepository history calls = %d, want 1", checkRepository.historyCalls)
 	}
 }

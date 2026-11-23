@@ -23,6 +23,12 @@ type CheckRepository interface {
 		endpointID int64,
 		result checks.Result,
 	) (checkerRepo.CheckResult, error)
+
+	GetByEndpointID(
+		ctx context.Context,
+		endpointID int64,
+		limit int,
+	) ([]checkerRepo.CheckResult, error)
 }
 
 type Service struct {
@@ -60,4 +66,22 @@ func (s *Service) CheckEndpoint(
 	}
 
 	return savedResult, nil
+}
+
+func (s *Service) GetCheckHistory(
+	ctx context.Context,
+	endpointID int64,
+	limit int,
+) ([]checkerRepo.CheckResult, error) {
+	_, err := s.endpointRepo.GetEndpointByID(ctx, endpointID)
+	if err != nil {
+		return nil, fmt.Errorf("get endpoint: %w", err)
+	}
+
+	results, err := s.checkRepo.GetByEndpointID(ctx, endpointID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get check history: %w", err)
+	}
+
+	return results, nil
 }

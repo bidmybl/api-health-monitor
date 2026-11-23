@@ -20,6 +20,7 @@ func NewRouter(
 	mux.HandleFunc("DELETE /endpoints/{id}", endpointHandler.DeleteEndpoint)
 
 	mux.HandleFunc("POST /endpoints/{id}/checks", checksHandler.CheckEndpoint)
+	mux.HandleFunc("GET /endpoints/{id}/checks", checksHandler.GetCheckHistory)
 
 	return mux
 }
