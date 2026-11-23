@@ -157,3 +157,48 @@ func (r *Repository) DeleteEndpoint(ctx context.Context, id int64) error {
 
 	return nil
 }
+
+func (r *Repository) GetEndpointsDueForCheck(
+	ctx context.Context,
+) ([]Endpoint, error) {
+	query := `
+		SELECT
+			e.id,
+			e.url,
+			e.check_interval_seconds,
+			e.is_active,
+			e.created_at,
+			e.updated_at
+		FROM monitored_endpoints e
+		LEFT JOIN LATERAL (
+			SELECT completed_at
+			FROM check_results
+			WHERE endpoint_id = e.id
+			ORDER BY completed_at DESC, id DESC
+			LIMIT 1
+		) last_check ON TRUE
+		WHERE e.is_active = TRUE
+			AND (
+				last_check.completed_at IS NULL
+				OR last_check.completed_at
+					+ e.check_interval_seconds * INTERVAL '1 second'
+					<= NOW()
+			)
+		ORDER BY e.id;
+	`
+
+	rows, err := r.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get endpoints due for check: %w", err)
+	}
+
+	endpoints, err := pgx.CollectRows(
+		rows,
+		pgx.RowToStructByName[Endpoint],
+	)
+	if err != nil {
+		return nil, fmt.Errorf("collect endpoints due for check: %w", err)
+	}
+
+	return endpoints, nil
+}
