@@ -123,7 +123,6 @@ func TestSchedulerContinuesAfterCheckError(t *testing.T) {
 	}
 }
 
-
 func TestSchedulerLimitsConcurrency(t *testing.T) {
 	const (
 		endpointCount = 12
@@ -201,7 +200,6 @@ func TestSchedulerLimitsConcurrency(t *testing.T) {
 	}
 }
 
-
 type trackingChecksService struct {
 	base    *fakeChecksService
 	started chan struct{}
@@ -248,7 +246,6 @@ func (s *trackingChecksService) maxObservedConcurrency() int {
 
 	return s.maxObserved
 }
-
 
 func TestSchedulerStopsWhenContextIsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
