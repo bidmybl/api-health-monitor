@@ -1,16 +1,23 @@
 FROM golang:1.27.3-alpine AS builder
+
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# CGO_ENABLED=0 делает бинарник статическим (идеально для Alpine)
-RUN CGO_ENABLED=0 GOOS=linux go build -o /app/exe ./cmd/api/
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /app/api \
+    ./cmd/api
 
 FROM alpine:3.22
-RUN apk --no-cache add ca-certificates tzdata
+
+RUN apk --no-cache add ca-certificates tzdata \
+    && addgroup -S app \
+    && adduser -S -G app app
 WORKDIR /app
-COPY --from=builder /app/exe .
-COPY migrations ./migrations
+COPY --from=builder --chown=app:app /app/api ./api
+USER app:app
 
 EXPOSE 8090
-ENTRYPOINT [ "/app/exe" ]
+ENTRYPOINT ["/app/api"]
