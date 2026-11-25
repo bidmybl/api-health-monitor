@@ -14,8 +14,12 @@ import (
 )
 
 type fakeEndpointRepository struct {
-	endpoints []endpointRepo.Endpoint
-	err       error
+	endpoints       []endpointRepo.Endpoint
+	err             error
+	lockUnavailable bool
+
+	mu           sync.Mutex
+	releaseCalls int
 }
 
 func (f *fakeEndpointRepository) GetEndpointsDueForCheck(
@@ -28,9 +32,24 @@ func (f *fakeEndpointRepository) TryAcquireCheckLock(
 	ctx context.Context,
 	endpointID int64,
 ) (func(context.Context) error, bool, error) {
+	if f.lockUnavailable {
+		return nil, false, nil
+	}
+
 	return func(context.Context) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		f.releaseCalls++
 		return nil
 	}, true, nil
+}
+
+func (f *fakeEndpointRepository) getReleaseCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.releaseCalls
 }
 
 type fakeChecksService struct {
@@ -265,5 +284,56 @@ func TestSchedulerStopsWhenContextIsCanceled(t *testing.T) {
 
 	if len(service.getCheckedIDs()) != 0 {
 		t.Errorf("checked endpoints after cancellation")
+	}
+}
+
+func TestSchedulerSkipsEndpointWhenLockIsUnavailable(t *testing.T) {
+	repository := &fakeEndpointRepository{
+		endpoints: []endpointRepo.Endpoint{
+			{ID: 1},
+		},
+		lockUnavailable: true,
+	}
+
+	service := &fakeChecksService{
+		errors: make(map[int64]error),
+	}
+
+	scheduler := New(repository, service, newTestLogger(), 0)
+	scheduler.runDueChecks(context.Background())
+
+	if got := len(service.getCheckedIDs()); got != 0 {
+		t.Errorf("checked %d endpoints, want 0", got)
+	}
+
+	if got := repository.getReleaseCalls(); got != 0 {
+		t.Errorf("released %d locks, want 0", got)
+	}
+}
+
+func TestSchedulerReleasesLockAfterCheckError(t *testing.T) {
+	repository := &fakeEndpointRepository{
+		endpoints: []endpointRepo.Endpoint{
+			{ID: 1},
+		},
+	}
+
+	service := &fakeChecksService{
+		errors: map[int64]error{
+			1: errors.New("check failed"),
+		},
+	}
+
+	scheduler := New(repository, service, newTestLogger(), 0)
+	scheduler.runDueChecks(context.Background())
+
+	checkedIDs := service.getCheckedIDs()
+
+	if len(checkedIDs) != 1 || checkedIDs[0] != 1 {
+		t.Fatalf("checked IDs = %v, want [1]", checkedIDs)
+	}
+
+	if got := repository.getReleaseCalls(); got != 1 {
+		t.Errorf("released %d locks, want 1", got)
 	}
 }
