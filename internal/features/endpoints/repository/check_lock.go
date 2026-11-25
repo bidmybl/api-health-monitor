@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -56,8 +57,6 @@ func (r *Repository) TryAcquireCheckLock(
 
 	release := func(releaseCtx context.Context) error {
 		once.Do(func() {
-			defer conn.Release()
-
 			var unlocked bool
 			err := conn.QueryRow(
 				releaseCtx,
@@ -66,9 +65,24 @@ func (r *Repository) TryAcquireCheckLock(
 			).Scan(&unlocked)
 
 			if err != nil {
-				releaseErr = fmt.Errorf("release endpoint check lock: %w", err)
+				rawConn := conn.Hijack()
+				closeErr := rawConn.Close(context.Background())
+
+				releaseErr = errors.Join(
+					fmt.Errorf("release endpoint check lock: %w", err),
+				)
+
+				if closeErr != nil {
+					releaseErr = errors.Join(
+						releaseErr,
+						fmt.Errorf("close database connection: %w", closeErr),
+					)
+				}
+
 				return
 			}
+
+			conn.Release()
 
 			if !unlocked {
 				releaseErr = fmt.Errorf("endpoint check lock was not held")
