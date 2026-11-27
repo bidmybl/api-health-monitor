@@ -1,0 +1,1 @@
+DROP INDEX idx_check_results_endpoint_completed_at;

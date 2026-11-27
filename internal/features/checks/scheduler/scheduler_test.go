@@ -14,14 +14,42 @@ import (
 )
 
 type fakeEndpointRepository struct {
-	endpoints []endpointRepo.Endpoint
-	err       error
+	endpoints       []endpointRepo.Endpoint
+	err             error
+	lockUnavailable bool
+
+	mu           sync.Mutex
+	releaseCalls int
 }
 
 func (f *fakeEndpointRepository) GetEndpointsDueForCheck(
 	ctx context.Context,
 ) ([]endpointRepo.Endpoint, error) {
 	return f.endpoints, f.err
+}
+
+func (f *fakeEndpointRepository) TryAcquireCheckLock(
+	ctx context.Context,
+	endpointID int64,
+) (func(context.Context) error, bool, error) {
+	if f.lockUnavailable {
+		return nil, false, nil
+	}
+
+	return func(context.Context) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		f.releaseCalls++
+		return nil
+	}, true, nil
+}
+
+func (f *fakeEndpointRepository) getReleaseCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.releaseCalls
 }
 
 type fakeChecksService struct {
@@ -120,33 +148,14 @@ func TestSchedulerLimitsConcurrency(t *testing.T) {
 		maxConcurrent = 3
 	)
 
-	var (
-		mu          sync.Mutex
-		active      int
-		maxObserved int
-	)
-
-	service := &fakeChecksService{
+	baseService := &fakeChecksService{
 		errors: make(map[int64]error),
 	}
 
-	// Wrap the service to track concurrent executions.
-	trackingService := &trackingChecksService{
-		base: service,
-		check: func(ctx context.Context, endpointID int64) {
-			mu.Lock()
-			active++
-			if active > maxObserved {
-				maxObserved = active
-			}
-			mu.Unlock()
-
-			time.Sleep(20 * time.Millisecond)
-
-			mu.Lock()
-			active--
-			mu.Unlock()
-		},
+	service := &trackingChecksService{
+		base:    baseService,
+		started: make(chan struct{}, endpointCount),
+		release: make(chan struct{}),
 	}
 
 	endpoints := make([]endpointRepo.Endpoint, endpointCount)
@@ -156,38 +165,105 @@ func TestSchedulerLimitsConcurrency(t *testing.T) {
 
 	scheduler := New(
 		&fakeEndpointRepository{endpoints: endpoints},
-		trackingService,
+		service,
 		newTestLogger(),
 		0,
 	)
 	scheduler.maxConcurrency = maxConcurrent
 
-	scheduler.runDueChecks(context.Background())
+	done := make(chan struct{})
 
-	if maxObserved > maxConcurrent {
-		t.Errorf("observed concurrency %d, limit is %d", maxObserved, maxConcurrent)
+	go func() {
+		scheduler.runDueChecks(context.Background())
+		close(done)
+	}()
+
+	// Wait until all workers have started their first check.
+	startTimeout := time.NewTimer(5 * time.Second)
+	defer startTimeout.Stop()
+
+	for range maxConcurrent {
+		select {
+		case <-service.started:
+		case <-startTimeout.C:
+			close(service.release)
+			<-done
+			t.Fatal("timed out waiting for concurrent checks to start")
+		}
 	}
 
-	if maxObserved < 2 {
-		t.Errorf("expected concurrent execution, observed %d", maxObserved)
+	// Allow all checks to finish.
+	close(service.release)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("scheduler did not finish")
 	}
 
-	if len(service.getCheckedIDs()) != endpointCount {
-		t.Errorf("not all endpoints were checked")
+	if got := service.maxObservedConcurrency(); got != maxConcurrent {
+		t.Errorf(
+			"maximum observed concurrency = %d, want %d",
+			got,
+			maxConcurrent,
+		)
+	}
+
+	checkedIDs := baseService.getCheckedIDs()
+	if len(checkedIDs) != endpointCount {
+		t.Errorf(
+			"checked %d endpoints, want %d",
+			len(checkedIDs),
+			endpointCount,
+		)
 	}
 }
 
 type trackingChecksService struct {
-	base  ChecksService
-	check func(context.Context, int64)
+	base    *fakeChecksService
+	started chan struct{}
+	release chan struct{}
+
+	mu          sync.Mutex
+	active      int
+	maxObserved int
 }
 
 func (s *trackingChecksService) CheckEndpoint(
 	ctx context.Context,
 	endpointID int64,
 ) (checkRepo.CheckResult, error) {
-	s.check(ctx, endpointID)
+	s.mu.Lock()
+
+	s.active++
+	if s.active > s.maxObserved {
+		s.maxObserved = s.active
+	}
+
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.active--
+		s.mu.Unlock()
+	}()
+
+	s.started <- struct{}{}
+
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return checkRepo.CheckResult{}, ctx.Err()
+	}
+
 	return s.base.CheckEndpoint(ctx, endpointID)
+}
+
+func (s *trackingChecksService) maxObservedConcurrency() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.maxObserved
 }
 
 func TestSchedulerStopsWhenContextIsCanceled(t *testing.T) {
@@ -208,5 +284,56 @@ func TestSchedulerStopsWhenContextIsCanceled(t *testing.T) {
 
 	if len(service.getCheckedIDs()) != 0 {
 		t.Errorf("checked endpoints after cancellation")
+	}
+}
+
+func TestSchedulerSkipsEndpointWhenLockIsUnavailable(t *testing.T) {
+	repository := &fakeEndpointRepository{
+		endpoints: []endpointRepo.Endpoint{
+			{ID: 1},
+		},
+		lockUnavailable: true,
+	}
+
+	service := &fakeChecksService{
+		errors: make(map[int64]error),
+	}
+
+	scheduler := New(repository, service, newTestLogger(), 0)
+	scheduler.runDueChecks(context.Background())
+
+	if got := len(service.getCheckedIDs()); got != 0 {
+		t.Errorf("checked %d endpoints, want 0", got)
+	}
+
+	if got := repository.getReleaseCalls(); got != 0 {
+		t.Errorf("released %d locks, want 0", got)
+	}
+}
+
+func TestSchedulerReleasesLockAfterCheckError(t *testing.T) {
+	repository := &fakeEndpointRepository{
+		endpoints: []endpointRepo.Endpoint{
+			{ID: 1},
+		},
+	}
+
+	service := &fakeChecksService{
+		errors: map[int64]error{
+			1: errors.New("check failed"),
+		},
+	}
+
+	scheduler := New(repository, service, newTestLogger(), 0)
+	scheduler.runDueChecks(context.Background())
+
+	checkedIDs := service.getCheckedIDs()
+
+	if len(checkedIDs) != 1 || checkedIDs[0] != 1 {
+		t.Fatalf("checked IDs = %v, want [1]", checkedIDs)
+	}
+
+	if got := repository.getReleaseCalls(); got != 1 {
+		t.Errorf("released %d locks, want 1", got)
 	}
 }
